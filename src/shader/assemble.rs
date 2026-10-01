@@ -1,5 +1,6 @@
 //! Wraps user-written WGSL in a fixed prelude (bindings, helpers) and epilogue (entry points).
 
+#[derive(Debug, Clone)]
 pub struct Assembled {
     pub source: String,
     /// Number of generated lines before the user's first line. User line `n` is assembled line `n + offset`.

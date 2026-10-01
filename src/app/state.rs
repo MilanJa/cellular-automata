@@ -1,0 +1,244 @@
+//! Pure application state and the shader build flow (no GPU, no UI).
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::Instant;
+
+use crate::preset::{param_value_from_toml, param_value_to_toml, Preset, PresetMeta};
+use crate::shader::assemble::{assemble_render, assemble_rule, Assembled};
+use crate::shader::params::{
+    merge_params, params_wgsl, parse_params, ParamError, ParamSpec, ParamValue,
+};
+use crate::shader::validate::{validate, ShaderError, ShaderFile};
+use crate::sim::SimConfig;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PresetSource {
+    Builtin(usize),
+    Disk(PathBuf),
+    Unsaved,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EditorState {
+    pub rule: String,
+    pub render: String,
+    /// True when an editor changed since the last successful apply.
+    pub dirty: bool,
+}
+
+pub struct AppState {
+    pub editor: EditorState,
+    pub specs: Vec<ParamSpec>,
+    pub values: BTreeMap<String, ParamValue>,
+    pub errors: Vec<ShaderError>,
+    pub playing: bool,
+    pub step_once: bool,
+    pub steps_per_frame: u32,
+    /// Grid settings as edited in the UI; applied to the simulation on Reset.
+    pub pending: SimConfig,
+    pub preset_name: String,
+    pub source: PresetSource,
+    pub disk_presets: Vec<(String, PathBuf)>,
+    pub started: Instant,
+}
+
+impl AppState {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        editor: EditorState,
+        pending: SimConfig,
+        steps_per_frame: u32,
+        specs: Vec<ParamSpec>,
+        values: BTreeMap<String, ParamValue>,
+        preset_name: String,
+        source: PresetSource,
+    ) -> Self {
+        AppState {
+            editor,
+            specs,
+            values,
+            errors: Vec::new(),
+            playing: true,
+            step_once: false,
+            steps_per_frame: steps_per_frame.max(1),
+            pending,
+            preset_name,
+            source,
+            disk_presets: Vec::new(),
+            started: Instant::now(),
+        }
+    }
+}
+
+fn param_err(file: ShaderFile, e: ParamError) -> ShaderError {
+    ShaderError { file, line: e.line.max(1), column: 1, message: e.message }
+}
+
+/// Parses params from both editors, merges them, assembles and validates both shaders.
+/// Returns every error found (rule errors first) or the specs plus both assembled sources.
+pub fn build_shaders(
+    editor: &EditorState,
+) -> Result<(Vec<ParamSpec>, Assembled, Assembled), Vec<ShaderError>> {
+    let rule_params =
+        parse_params(&editor.rule).map_err(|e| vec![param_err(ShaderFile::Rule, e)])?;
+    let render_params =
+        parse_params(&editor.render).map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
+    let specs = merge_params(rule_params, render_params)
+        .map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
+    let pw = params_wgsl(&specs);
+    let rule = assemble_rule(&editor.rule, &pw);
+    let render = assemble_render(&editor.render, &pw);
+    let mut errors = Vec::new();
+    if let Err(e) = validate(ShaderFile::Rule, &rule) {
+        errors.extend(e);
+    }
+    if let Err(e) = validate(ShaderFile::Render, &render) {
+        errors.extend(e);
+    }
+    if errors.is_empty() { Ok((specs, rule, render)) } else { Err(errors) }
+}
+
+/// Splits a preset into editor text, grid config, steps-per-frame and its raw TOML param values.
+pub fn preset_to_state(
+    preset: &Preset,
+) -> (EditorState, SimConfig, u32, BTreeMap<String, toml::Value>) {
+    let m = &preset.meta;
+    let editor =
+        EditorState { rule: preset.rule.clone(), render: preset.render.clone(), dirty: false };
+    let config = SimConfig {
+        mode: m.mode,
+        width: m.width,
+        height: m.height,
+        init: m.init.clone(),
+        seed: m.seed,
+    };
+    (editor, config, m.steps_per_frame.max(1), m.params.clone())
+}
+
+pub fn state_to_preset(state: &AppState) -> Preset {
+    let params = state
+        .specs
+        .iter()
+        .filter_map(|s| state.values.get(&s.name).map(|v| (s.name.clone(), param_value_to_toml(v))))
+        .collect();
+    let c = &state.pending;
+    Preset {
+        meta: PresetMeta {
+            name: state.preset_name.clone(),
+            mode: c.mode,
+            width: c.width,
+            height: c.height,
+            steps_per_frame: state.steps_per_frame,
+            seed: c.seed,
+            init: c.init.clone(),
+            params,
+        },
+        rule: state.editor.rule.clone(),
+        render: state.editor.render.clone(),
+    }
+}
+
+/// Value precedence: TOML value (if its type matches) > previous value (if type matches) > default.
+pub fn resolve_values(
+    specs: &[ParamSpec],
+    toml_params: &BTreeMap<String, toml::Value>,
+    previous: &BTreeMap<String, ParamValue>,
+) -> BTreeMap<String, ParamValue> {
+    specs
+        .iter()
+        .map(|s| {
+            let v = toml_params
+                .get(&s.name)
+                .and_then(|t| param_value_from_toml(s.ty, t))
+                .or_else(|| previous.get(&s.name).filter(|p| p.ty() == s.ty).cloned())
+                .unwrap_or_else(|| s.default.clone());
+            (s.name.clone(), v)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preset::builtin::{load_builtin, BUILTINS};
+    use crate::shader::params::{parse_params, ParamValue};
+
+    #[test]
+    fn build_shaders_for_every_builtin_succeeds() {
+        for b in BUILTINS {
+            let p = load_builtin(b);
+            let (editor, _, _, _) = preset_to_state(&p);
+            build_shaders(&editor).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+        }
+    }
+
+    #[test]
+    fn build_shaders_collects_param_errors_with_file() {
+        let editor = EditorState {
+            rule: "// @param x: f64 = 1\nfn rule(pos: vec2<u32>) -> vec4<f32> { return vec4<f32>(0.0); }".into(),
+            render: "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return cell; }".into(),
+            dirty: false,
+        };
+        let errs = build_shaders(&editor).unwrap_err();
+        assert_eq!(errs[0].file, ShaderFile::Rule);
+        assert_eq!(errs[0].line, 1);
+    }
+
+    #[test]
+    fn build_shaders_reports_both_files() {
+        let editor = EditorState {
+            rule: "fn rule(pos: vec2<u32>) -> vec4<f32> { return 1.0; }".into(),
+            render: "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return 1.0; }".into(),
+            dirty: false,
+        };
+        let errs = build_shaders(&editor).unwrap_err();
+        assert!(errs.iter().any(|e| e.file == ShaderFile::Rule));
+        assert!(errs.iter().any(|e| e.file == ShaderFile::Render));
+    }
+
+    #[test]
+    fn resolve_values_prefers_toml_then_previous_then_default() {
+        let specs = parse_params(
+            "// @param a: f32 = 1\n// @param b: f32 = 2\n// @param c: f32 = 3\n// @param d: i32 = 4\n",
+        )
+        .unwrap();
+        let mut toml_params = BTreeMap::new();
+        toml_params.insert("a".to_string(), toml::Value::Float(10.0));
+        toml_params.insert("d".to_string(), toml::Value::Float(1.5)); // wrong type for i32
+        toml_params.insert("ghost".to_string(), toml::Value::Float(0.0)); // undeclared
+        let mut previous = BTreeMap::new();
+        previous.insert("b".to_string(), ParamValue::F32(20.0));
+        previous.insert("c".to_string(), ParamValue::I32(7)); // type mismatch
+        let v = resolve_values(&specs, &toml_params, &previous);
+        assert_eq!(v["a"], ParamValue::F32(10.0));
+        assert_eq!(v["b"], ParamValue::F32(20.0));
+        assert_eq!(v["c"], ParamValue::F32(3.0));
+        assert_eq!(v["d"], ParamValue::I32(4));
+        assert!(!v.contains_key("ghost"));
+    }
+
+    #[test]
+    fn preset_round_trips_through_state() {
+        let p = load_builtin(&BUILTINS[2]);
+        let (editor, config, spf, toml_params) = preset_to_state(&p);
+        let (specs, _, _) = build_shaders(&editor).unwrap();
+        let values = resolve_values(&specs, &toml_params, &BTreeMap::new());
+        let state = AppState::from_parts(
+            editor,
+            config,
+            spf,
+            specs,
+            values,
+            p.meta.name.clone(),
+            PresetSource::Builtin(2),
+        );
+        let back = state_to_preset(&state);
+        assert_eq!(back.rule, p.rule);
+        assert_eq!(back.render, p.render);
+        assert_eq!(back.meta.width, p.meta.width);
+        assert_eq!(back.meta.mode, p.meta.mode);
+        assert_eq!(back.meta.name, p.meta.name);
+        assert!(back.meta.params.contains_key("fade"));
+    }
+}

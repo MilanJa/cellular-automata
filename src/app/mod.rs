@@ -1,3 +1,5 @@
+pub mod state;
+
 pub struct App;
 
 impl App {
