@@ -1,0 +1,167 @@
+//! Wraps user-written WGSL in a fixed prelude (bindings, helpers) and epilogue (entry points).
+
+pub struct Assembled {
+    pub source: String,
+    /// Number of generated lines before the user's first line. User line `n` is assembled line `n + offset`.
+    pub user_line_offset: usize,
+    pub user_line_count: usize,
+}
+
+pub const GLOBALS_WGSL: &str = r#"struct Globals {
+    size: vec2<u32>,
+    frame: u32,
+    seed: u32,
+    time: f32,
+    mode: u32,
+    row: u32,
+    prev_row: u32,
+}
+"#;
+
+const RULE_PRELUDE: &str = r#"@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var dst: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(2) var<uniform> globals: Globals;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn wrap(v: i32, n: u32) -> u32 {
+    let ni = i32(n);
+    return u32(((v % ni) + ni) % ni);
+}
+
+fn cell(x: i32, y: i32) -> vec4<f32> {
+    return textureLoad(src, vec2<u32>(wrap(x, globals.size.x), wrap(y, globals.size.y)), 0);
+}
+
+fn prev_cell(x: i32) -> vec4<f32> {
+    return cell(x, i32(globals.prev_row));
+}
+
+fn hash(v: u32) -> u32 {
+    var x = v;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+fn rand(pos: vec2<u32>, salt: u32) -> f32 {
+    let h = hash(pos.x ^ hash(pos.y ^ hash(salt ^ globals.seed)));
+    return f32(h) / 4294967295.0;
+}
+
+// ---- user rule ----
+"#;
+
+const RULE_EPILOGUE: &str = r#"
+// ---- entry ----
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    var pos = gid.xy;
+    if (globals.mode == 1u) {
+        if (gid.y != 0u) { return; }
+        pos.y = globals.row;
+    }
+    if (pos.x >= globals.size.x || pos.y >= globals.size.y) { return; }
+    textureStore(dst, pos, rule(pos));
+}
+"#;
+
+const RENDER_PRELUDE: &str = r#"@group(0) @binding(0) var state: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> globals: Globals;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn cell(x: i32, y: i32) -> vec4<f32> {
+    let w = i32(globals.size.x);
+    let h = i32(globals.size.y);
+    let xx = u32(((x % w) + w) % w);
+    let yy = u32(((y % h) + h) % h);
+    return textureLoad(state, vec2<u32>(xx, yy), 0);
+}
+
+// ---- user render ----
+"#;
+
+const RENDER_EPILOGUE: &str = r#"
+// ---- entry ----
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(vi & 1u) * 4 - 1);
+    let y = f32(i32(vi >> 1u) * 4 - 1);
+    out.pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let fsize = vec2<f32>(globals.size);
+    let p = vec2<u32>(clamp(in.uv * fsize, vec2<f32>(0.0), fsize - vec2<f32>(1.0)));
+    let c = textureLoad(state, p, 0);
+    return shade(in.uv, c);
+}
+"#;
+
+fn assemble(prelude: &str, user: &str, params_struct: &str, epilogue: &str) -> Assembled {
+    let head = format!("{GLOBALS_WGSL}{params_struct}{prelude}");
+    let user_line_offset = head.lines().count();
+    let user_line_count = user.lines().count().max(1);
+    let source = format!("{head}{user}\n{epilogue}");
+    Assembled { source, user_line_offset, user_line_count }
+}
+
+pub fn assemble_rule(user: &str, params_struct: &str) -> Assembled {
+    assemble(RULE_PRELUDE, user, params_struct, RULE_EPILOGUE)
+}
+
+pub fn assemble_render(user: &str, params_struct: &str) -> Assembled {
+    assemble(RENDER_PRELUDE, user, params_struct, RENDER_EPILOGUE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shader::params::params_wgsl;
+
+    #[test]
+    fn rule_offset_points_at_user_source() {
+        let user = "fn rule(pos: vec2<u32>) -> vec4<f32> { return vec4<f32>(0.0); }";
+        let a = assemble_rule(user, &params_wgsl(&[]));
+        let lines: Vec<&str> = a.source.lines().collect();
+        assert_eq!(lines[a.user_line_offset], user);
+        assert_eq!(a.user_line_count, 1);
+    }
+
+    #[test]
+    fn render_offset_points_at_user_source() {
+        let user = "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return cell; }";
+        let a = assemble_render(user, &params_wgsl(&[]));
+        let lines: Vec<&str> = a.source.lines().collect();
+        assert_eq!(lines[a.user_line_offset], user);
+    }
+
+    #[test]
+    fn rule_contains_bindings_and_entry() {
+        let a = assemble_rule(
+            "fn rule(pos: vec2<u32>) -> vec4<f32> { return vec4<f32>(0.0); }",
+            &params_wgsl(&[]),
+        );
+        assert!(a.source.contains("@group(0) @binding(0) var src: texture_2d<f32>;"));
+        assert!(a.source.contains("@group(0) @binding(1) var dst: texture_storage_2d<rgba32float, write>;"));
+        assert!(a.source.contains("@compute @workgroup_size(16, 16)"));
+    }
+
+    #[test]
+    fn offset_counts_params_struct_lines() {
+        let one = assemble_rule("x", "struct Params { a: f32, }\n");
+        let two = assemble_rule("x", "struct Params {\n a: f32,\n}\n");
+        assert_eq!(two.user_line_offset, one.user_line_offset + 2);
+    }
+}
