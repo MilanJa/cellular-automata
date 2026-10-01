@@ -488,3 +488,111 @@ fn create_textures(
     let render_bind_groups = [render_bg(0), render_bg(1)];
     Textures { tex, compute_bind_groups, render_bind_groups }
 }
+
+/// GPU tests: need a real adapter, so they are `#[ignore]`d for CI. Run with
+/// `cargo test gpu_tests -- --ignored`.
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+    use crate::preset::builtin::{load_builtin, BUILTINS};
+    use crate::shader::assemble::{assemble_render, assemble_rule};
+    use crate::shader::params::{merge_params, params_wgsl, parse_params};
+
+    /// Creating several devices concurrently from test threads hangs on some drivers, so every
+    /// GPU test holds this lock for its whole duration.
+    static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+        GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+        Some((device, queue))
+    }
+
+    fn sim_with(config: SimConfig) -> Option<Simulation> {
+        let (device, queue) = device()?;
+        Some(Simulation::new(device, queue, wgpu::TextureFormat::Bgra8UnormSrgb, config))
+    }
+
+    fn config(mode: Mode, w: u32, h: u32) -> SimConfig {
+        SimConfig { mode, width: w, height: h, init: InitPattern::Single, seed: 1 }
+    }
+
+    fn assembled_for(rule: &str, render: &str) -> (Assembled, Assembled) {
+        let specs = merge_params(parse_params(rule).unwrap(), parse_params(render).unwrap()).unwrap();
+        let pw = params_wgsl(&specs);
+        (assemble_rule(rule, &pw), assemble_render(render, &pw))
+    }
+
+    /// Runs `n` steps, submits, and returns any validation error the GPU backend reported.
+    fn step_and_check(sim: &mut Simulation, n: u32) -> Option<wgpu::Error> {
+        let scope = sim.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        sim.step(&mut enc, n);
+        sim.queue.submit([enc.finish()]);
+        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+        pollster::block_on(scope.pop())
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn every_builtin_compiles_on_the_real_backend_and_steps() {
+        let _gpu = gpu_lock();
+        for b in BUILTINS {
+            let p = load_builtin(b);
+            let (rule, render) = assembled_for(&p.rule, &p.render);
+            let Some(mut sim) = sim_with(config(p.meta.mode, 64, 32)) else { return };
+            sim.set_rule(ShaderFile::Rule, &rule).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+            sim.set_render(ShaderFile::Render, &render).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+            assert!(sim.has_pipelines());
+            assert!(step_and_check(&mut sim, 40).is_none(), "{}: validation error while stepping", b.id);
+            assert_eq!(sim.frame(), 40);
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn bad_rule_is_rejected_and_old_pipeline_stays() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let Some(mut sim) = sim_with(config(Mode::TwoD, 32, 32)) else { return };
+        sim.set_rule(ShaderFile::Rule, &rule).unwrap();
+        sim.set_render(ShaderFile::Render, &render).unwrap();
+        let (bad, _) = assembled_for("fn rule(pos: vec2<u32>) -> vec4<f32> { return bogus(; }", &p.render);
+        let errs = sim.set_rule(ShaderFile::Rule, &bad).unwrap_err();
+        assert_eq!(errs[0].line, 1);
+        assert!(sim.has_pipelines(), "a failed build must not remove the live pipeline");
+        assert!(step_and_check(&mut sim, 3).is_none());
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn one_d_steps_past_the_bottom_and_with_height_one_without_validation_errors() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[0]);
+        let (rule, render) = assembled_for(&p.rule, &p.render);
+        for h in [1u32, 2, 5] {
+            let Some(mut sim) = sim_with(config(Mode::OneD, 16, h)) else { return };
+            sim.set_rule(ShaderFile::Rule, &rule).unwrap();
+            sim.set_render(ShaderFile::Render, &render).unwrap();
+            assert!(step_and_check(&mut sim, h + 7).is_none(), "height {h}: validation error");
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn reconfigure_clamps_and_resizes() {
+        let _gpu = gpu_lock();
+        let Some(mut sim) = sim_with(config(Mode::TwoD, 8, 8)) else { return };
+        let huge = sim.device.limits().max_texture_dimension_2d.saturating_mul(2);
+        sim.reconfigure(config(Mode::TwoD, huge, 4));
+        assert!(sim.config().width <= sim.device.limits().max_texture_dimension_2d);
+        assert_eq!(sim.config().height, 4);
+        assert_eq!(sim.frame(), 0);
+    }
+}

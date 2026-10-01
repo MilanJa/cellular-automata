@@ -68,9 +68,11 @@ mod tests {
 
     #[test]
     fn clamp_size_respects_texture_and_dispatch_limits() {
-        let mut limits = wgpu::Limits::default();
-        limits.max_texture_dimension_2d = 2048;
-        limits.max_compute_workgroups_per_dimension = 100;
+        let mut limits = wgpu::Limits {
+            max_texture_dimension_2d: 2048,
+            max_compute_workgroups_per_dimension: 100,
+            ..wgpu::Limits::default()
+        };
         assert_eq!(clamp_size(4096, &limits), 1600);
         limits.max_compute_workgroups_per_dimension = 65535;
         assert_eq!(clamp_size(4096, &limits), 2048);

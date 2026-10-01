@@ -118,7 +118,7 @@ mod tests {
     fn missing_rule_function_is_reported_in_user_range() {
         let user = "fn not_rule() -> f32 { return 1.0; }\n";
         let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
-        assert!(errs[0].line >= 1 && errs[0].line <= 1);
+        assert_eq!(errs[0].line, 1);
         assert!(errs[0].message.contains("rule"));
     }
 
