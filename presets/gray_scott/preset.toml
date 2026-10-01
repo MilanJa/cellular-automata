@@ -1,0 +1,12 @@
+name = "Gray-Scott Reaction-Diffusion"
+mode = "2d"
+width = 512
+height = 512
+steps_per_frame = 8
+seed = 3
+
+[init]
+kind = "random"
+density = 0.02
+
+[params]

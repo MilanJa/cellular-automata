@@ -1,5 +1,7 @@
 //! A preset is a folder with `preset.toml`, `rule.wgsl` and `render.wgsl`.
 
+pub mod builtin;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

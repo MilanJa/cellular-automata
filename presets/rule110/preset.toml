@@ -1,0 +1,13 @@
+name = "Rule 110"
+mode = "1d"
+width = 1024
+height = 512
+steps_per_frame = 2
+seed = 2
+
+[init]
+kind = "random"
+density = 0.5
+
+[params]
+rule_number = 110

@@ -1,0 +1,12 @@
+name = "Game of Life"
+mode = "2d"
+width = 512
+height = 512
+steps_per_frame = 1
+seed = 42
+
+[init]
+kind = "random"
+density = 0.3
+
+[params]

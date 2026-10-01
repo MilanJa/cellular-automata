@@ -1,0 +1,11 @@
+name = "Rule 30"
+mode = "1d"
+width = 1024
+height = 512
+steps_per_frame = 2
+seed = 1
+
+[init]
+kind = "single"
+
+[params]
