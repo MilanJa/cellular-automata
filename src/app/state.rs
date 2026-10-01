@@ -4,13 +4,17 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::preset::{param_value_from_toml, param_value_to_toml, Preset, PresetMeta};
+use crate::preset::{param_value_from_toml, param_value_to_toml, InitPattern, Preset, PresetMeta};
 use crate::shader::assemble::{assemble_render, assemble_rule, Assembled};
 use crate::shader::params::{
     merge_params, params_wgsl, parse_params, ParamError, ParamSpec, ParamValue,
 };
 use crate::shader::validate::{validate, ShaderError, ShaderFile};
 use crate::sim::SimConfig;
+
+/// Upper bounds applied to values coming from the UI *and* from hand-edited preset files.
+pub const MAX_STEPS_PER_FRAME: u32 = 256;
+pub const MAX_GRID_SIZE: u32 = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PresetSource {
@@ -106,14 +110,50 @@ pub fn preset_to_state(
     let m = &preset.meta;
     let editor =
         EditorState { rule: preset.rule.clone(), render: preset.render.clone(), dirty: false };
+    let init = match &m.init {
+        InitPattern::Random { density } => InitPattern::Random {
+            density: if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.5 },
+        },
+        other => other.clone(),
+    };
     let config = SimConfig {
         mode: m.mode,
-        width: m.width,
-        height: m.height,
-        init: m.init.clone(),
+        width: m.width.clamp(1, MAX_GRID_SIZE),
+        height: m.height.clamp(1, MAX_GRID_SIZE),
+        init,
         seed: m.seed,
     };
-    (editor, config, m.steps_per_frame.max(1), m.params.clone())
+    (editor, config, m.steps_per_frame.clamp(1, MAX_STEPS_PER_FRAME), m.params.clone())
+}
+
+/// Everything needed to switch the app to a preset, computed *before* any state is touched.
+#[derive(Debug)]
+pub struct LoadedPreset {
+    pub editor: EditorState,
+    pub config: SimConfig,
+    pub steps_per_frame: u32,
+    pub specs: Vec<ParamSpec>,
+    pub rule: Assembled,
+    pub render: Assembled,
+    pub toml_params: BTreeMap<String, toml::Value>,
+    pub name: String,
+}
+
+/// Validates a preset's shaders and prepares the new state. Fails without side effects, so a
+/// preset with a broken shader leaves the current session untouched.
+pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderError>> {
+    let (editor, config, steps_per_frame, toml_params) = preset_to_state(preset);
+    let (specs, rule, render) = build_shaders(&editor)?;
+    Ok(LoadedPreset {
+        editor,
+        config,
+        steps_per_frame,
+        specs,
+        rule,
+        render,
+        toml_params,
+        name: preset.meta.name.clone(),
+    })
 }
 
 pub fn state_to_preset(state: &AppState) -> Preset {
@@ -240,5 +280,35 @@ mod tests {
         assert_eq!(back.meta.mode, p.meta.mode);
         assert_eq!(back.meta.name, p.meta.name);
         assert!(back.meta.params.contains_key("fade"));
+    }
+
+    #[test]
+    fn prepare_preset_load_rejects_bad_shader() {
+        let mut p = load_builtin(&BUILTINS[2]);
+        p.rule = "fn rule(pos: vec2<u32>) -> vec4<f32> { return oops(; }".into();
+        let errs = prepare_preset_load(&p).unwrap_err();
+        assert_eq!(errs[0].file, ShaderFile::Rule);
+        assert_eq!(errs[0].line, 1);
+        let good = load_builtin(&BUILTINS[2]);
+        let loaded = prepare_preset_load(&good).unwrap();
+        assert_eq!(loaded.editor.rule, good.rule);
+        assert!(loaded.specs.iter().any(|s| s.name == "fade"));
+    }
+
+    #[test]
+    fn preset_to_state_clamps_hand_edited_values() {
+        let mut p = load_builtin(&BUILTINS[2]);
+        p.meta.steps_per_frame = 100_000;
+        p.meta.width = 100_000;
+        p.meta.height = 0;
+        p.meta.init = crate::preset::InitPattern::Random { density: f32::NAN };
+        let (_, config, spf, _) = preset_to_state(&p);
+        assert_eq!(spf, MAX_STEPS_PER_FRAME);
+        assert_eq!(config.width, MAX_GRID_SIZE);
+        assert_eq!(config.height, 1);
+        match config.init {
+            crate::preset::InitPattern::Random { density } => assert!((0.0..=1.0).contains(&density)),
+            other => panic!("unexpected init {other:?}"),
+        }
     }
 }

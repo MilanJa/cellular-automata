@@ -16,7 +16,10 @@ use crate::shader::params::pack_params;
 use crate::shader::validate::{ShaderError, ShaderFile};
 use crate::sim::Simulation;
 use crate::viewport::show_viewport;
-use state::{build_shaders, preset_to_state, resolve_values, state_to_preset, AppState, PresetSource};
+use state::{
+    build_shaders, prepare_preset_load, preset_to_state, resolve_values, state_to_preset, AppState,
+    PresetSource,
+};
 
 const PRESETS_DIR: &str = "presets";
 const DEFAULT_BUILTIN: usize = 2; // Game of Life
@@ -73,17 +76,38 @@ impl App {
         app
     }
 
+    /// Switches to `preset` only if its shaders compile; otherwise reports the errors and leaves
+    /// the current editors, grid and params exactly as they were.
     pub(crate) fn load_preset(&mut self, preset: Preset, source: PresetSource) {
-        let (editor, config, spf, toml_params) = preset_to_state(&preset);
-        self.state.editor = editor;
-        self.state.pending = config.clone();
-        self.state.steps_per_frame = spf;
-        self.state.preset_name = preset.meta.name.clone();
+        let loaded = match prepare_preset_load(&preset) {
+            Ok(l) => l,
+            Err(mut errors) => {
+                for e in &mut errors {
+                    e.message = format!("[{}] {}", preset.meta.name, e.message);
+                }
+                self.state.errors = errors;
+                return;
+            }
+        };
+        let mut sim = self.sim.lock().unwrap();
+        if let Err(errors) = sim.set_pipelines(&loaded.rule, &loaded.render) {
+            drop(sim);
+            self.state.errors = errors;
+            return;
+        }
+        sim.reconfigure(loaded.config.clone());
+        let config = sim.config().clone();
+        drop(sim);
+        self.state.editor = loaded.editor;
+        self.state.pending = config;
+        self.state.steps_per_frame = loaded.steps_per_frame;
+        self.state.preset_name = loaded.name;
         self.state.source = source;
-        self.state.values.clear();
-        self.sim.lock().unwrap().reconfigure(config);
+        self.state.values = resolve_values(&loaded.specs, &loaded.toml_params, &BTreeMap::new());
+        self.state.specs = loaded.specs;
+        self.state.errors.clear();
         self.state.started = std::time::Instant::now();
-        self.apply_shaders_with_toml(&toml_params);
+        self.push_params();
     }
 
     pub(crate) fn apply_shaders(&mut self) {
@@ -94,22 +118,17 @@ impl App {
         match build_shaders(&self.state.editor) {
             Err(errors) => self.state.errors = errors,
             Ok((specs, rule, render)) => {
-                let mut sim = self.sim.lock().unwrap();
-                let mut errors: Vec<ShaderError> = Vec::new();
-                if let Err(e) = sim.set_rule(ShaderFile::Rule, &rule) {
-                    errors.extend(e);
+                let result = self.sim.lock().unwrap().set_pipelines(&rule, &render);
+                match result {
+                    Err(errors) => self.state.errors = errors,
+                    Ok(()) => {
+                        self.state.values = resolve_values(&specs, toml_params, &self.state.values);
+                        self.state.specs = specs;
+                        self.state.editor.dirty = false;
+                        self.state.errors.clear();
+                        self.push_params();
+                    }
                 }
-                if let Err(e) = sim.set_render(ShaderFile::Render, &render) {
-                    errors.extend(e);
-                }
-                drop(sim);
-                if errors.is_empty() {
-                    self.state.values = resolve_values(&specs, toml_params, &self.state.values);
-                    self.state.specs = specs;
-                    self.state.editor.dirty = false;
-                    self.push_params();
-                }
-                self.state.errors = errors;
             }
         }
     }

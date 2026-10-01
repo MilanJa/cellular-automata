@@ -51,13 +51,15 @@ fn map_location(
     ShaderError { file, line, column, message }
 }
 
-fn headline(diagnostic: &str) -> String {
-    diagnostic
-        .lines()
-        .next()
-        .unwrap_or("validation error")
-        .trim_start_matches("error: ")
-        .to_string()
+/// Joins an error and its `source()` chain into one line, innermost cause last.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut cur = e.source();
+    while let Some(src) = cur {
+        parts.push(src.to_string());
+        cur = src.source();
+    }
+    parts.join(": ")
 }
 
 pub fn validate(file: ShaderFile, assembled: &Assembled) -> Result<naga::Module, Vec<ShaderError>> {
@@ -68,15 +70,24 @@ pub fn validate(file: ShaderFile, assembled: &Assembled) -> Result<naga::Module,
             return Err(vec![map_location(file, assembled, loc, e.message().to_string())]);
         }
     };
+    // The device is created with default features, so only the baseline capability set is
+    // allowed; anything beyond it (f64, f16, subgroups, ...) is reported here instead of
+    // reaching the GPU backend.
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
+        naga::valid::Capabilities::empty(),
     );
     match validator.validate(&module) {
         Ok(_) => Ok(module),
         Err(e) => {
-            let loc = e.location(&assembled.source);
-            let message = headline(&e.emit_to_string(&assembled.source));
+            // The innermost span is the most specific (the offending expression), while the
+            // outermost usually just points at the enclosing function.
+            let loc = e
+                .spans()
+                .last()
+                .map(|(span, _)| span.location(&assembled.source))
+                .or_else(|| e.location(&assembled.source));
+            let message = error_chain(e.as_inner());
             Err(vec![map_location(file, assembled, loc, message)])
         }
     }
@@ -127,5 +138,13 @@ mod tests {
         let user = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    return vec4<f32>(0.0);\n";
         let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
         assert!(errs[0].line >= 1 && errs[0].line <= 2, "line was {}", errs[0].line);
+    }
+
+    #[test]
+    fn features_the_device_lacks_are_rejected_by_validation() {
+        // f64 needs the FLOAT64 capability, which the default device does not have.
+        let user = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let d: f64 = 1.0lf;\n    return vec4<f32>(f32(d));\n}\n";
+        let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
+        assert_eq!(errs[0].line, 2, "{:?}", errs[0]);
     }
 }

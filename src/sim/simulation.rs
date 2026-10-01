@@ -141,6 +141,10 @@ impl Simulation {
             config.width,
             config.height,
         );
+        // Anything the error scopes miss is logged rather than aborting the process.
+        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+            log::error!("uncaptured wgpu error: {e}");
+        }));
         let mut sim = Simulation {
             device,
             queue,
@@ -199,21 +203,25 @@ impl Simulation {
         let c = &self.config;
         let data = generate_init(&c.init, c.mode, c.width, c.height, c.seed);
         self.cur = 0;
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.textures.tex[0],
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&data),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(c.width * 16),
-                rows_per_image: Some(c.height),
-            },
-            wgpu::Extent3d { width: c.width, height: c.height, depth_or_array_layers: 1 },
-        );
+        // Both textures get the init state: in 1D mode a step only copies the rows above the
+        // write head, so stale rows in the other texture would otherwise show through.
+        for tex in &self.textures.tex {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&data),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(c.width * 16),
+                    rows_per_image: Some(c.height),
+                },
+                wgpu::Extent3d { width: c.width, height: c.height, depth_or_array_layers: 1 },
+            );
+        }
         self.globals = Globals {
             size: [c.width, c.height],
             frame: 0,
@@ -251,18 +259,6 @@ impl Simulation {
         );
     }
 
-    fn create_module(
-        &self,
-        file: ShaderFile,
-        assembled: &Assembled,
-    ) -> Result<wgpu::ShaderModule, Vec<ShaderError>> {
-        validate(file, assembled)?;
-        Ok(self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(file.label()),
-            source: wgpu::ShaderSource::Wgsl(assembled.source.as_str().into()),
-        }))
-    }
-
     fn backend_error(file: ShaderFile, err: Option<wgpu::Error>) -> Result<(), Vec<ShaderError>> {
         match err {
             None => Ok(()),
@@ -275,11 +271,25 @@ impl Simulation {
         }
     }
 
-    pub fn set_rule(
-        &mut self,
+    /// Validates with naga, then creates the module inside a validation error scope so a
+    /// backend rejection is returned instead of hitting the uncaptured-error handler.
+    fn create_module(
+        &self,
         file: ShaderFile,
         assembled: &Assembled,
-    ) -> Result<(), Vec<ShaderError>> {
+    ) -> Result<wgpu::ShaderModule, Vec<ShaderError>> {
+        validate(file, assembled)?;
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(file.label()),
+            source: wgpu::ShaderSource::Wgsl(assembled.source.as_str().into()),
+        });
+        Self::backend_error(file, pollster::block_on(scope.pop()))?;
+        Ok(module)
+    }
+
+    fn build_compute(&self, assembled: &Assembled) -> Result<wgpu::ComputePipeline, Vec<ShaderError>> {
+        let file = ShaderFile::Rule;
         let module = self.create_module(file, assembled)?;
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -291,15 +301,11 @@ impl Simulation {
             cache: None,
         });
         Self::backend_error(file, pollster::block_on(scope.pop()))?;
-        self.compute = Some(pipeline);
-        Ok(())
+        Ok(pipeline)
     }
 
-    pub fn set_render(
-        &mut self,
-        file: ShaderFile,
-        assembled: &Assembled,
-    ) -> Result<(), Vec<ShaderError>> {
+    fn build_render(&self, assembled: &Assembled) -> Result<wgpu::RenderPipeline, Vec<ShaderError>> {
+        let file = ShaderFile::Render;
         let module = self.create_module(file, assembled)?;
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -331,8 +337,35 @@ impl Simulation {
             cache: None,
         });
         Self::backend_error(file, pollster::block_on(scope.pop()))?;
-        self.render = Some(pipeline);
-        Ok(())
+        Ok(pipeline)
+    }
+
+    /// Builds both pipelines and swaps them in together. On any error nothing changes, so the
+    /// live pipelines always agree on the `Params` layout. Errors from both shaders are returned.
+    pub fn set_pipelines(
+        &mut self,
+        rule: &Assembled,
+        render: &Assembled,
+    ) -> Result<(), Vec<ShaderError>> {
+        let compute = self.build_compute(rule);
+        let render = self.build_render(render);
+        match (compute, render) {
+            (Ok(c), Ok(r)) => {
+                self.compute = Some(c);
+                self.render = Some(r);
+                Ok(())
+            }
+            (c, r) => {
+                let mut errors = Vec::new();
+                if let Err(e) = c {
+                    errors.extend(e);
+                }
+                if let Err(e) = r {
+                    errors.extend(e);
+                }
+                Err(errors)
+            }
+        }
     }
 
     /// Records `n` simulation steps into `encoder`.
@@ -496,7 +529,7 @@ mod gpu_tests {
     use super::*;
     use crate::preset::builtin::{load_builtin, BUILTINS};
     use crate::shader::assemble::{assemble_render, assemble_rule};
-    use crate::shader::params::{merge_params, params_wgsl, parse_params};
+    use crate::shader::params::{merge_params, pack_params, params_wgsl, parse_params};
 
     /// Creating several devices concurrently from test threads hangs on some drivers, so every
     /// GPU test holds this lock for its whole duration.
@@ -528,6 +561,12 @@ mod gpu_tests {
         (assemble_rule(rule, &pw), assemble_render(render, &pw))
     }
 
+    /// Uploads the shaders' default param values, as the app does after a successful apply.
+    fn upload_default_params(sim: &mut Simulation, rule: &str, render: &str) {
+        let specs = merge_params(parse_params(rule).unwrap(), parse_params(render).unwrap()).unwrap();
+        sim.set_params(pack_params(&specs, &std::collections::BTreeMap::new()));
+    }
+
     /// Runs `n` steps, submits, and returns any validation error the GPU backend reported.
     fn step_and_check(sim: &mut Simulation, n: u32) -> Option<wgpu::Error> {
         let scope = sim.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -546,8 +585,8 @@ mod gpu_tests {
             let p = load_builtin(b);
             let (rule, render) = assembled_for(&p.rule, &p.render);
             let Some(mut sim) = sim_with(config(p.meta.mode, 64, 32)) else { return };
-            sim.set_rule(ShaderFile::Rule, &rule).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
-            sim.set_render(ShaderFile::Render, &render).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+            sim.set_pipelines(&rule, &render).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+            upload_default_params(&mut sim, &p.rule, &p.render);
             assert!(sim.has_pipelines());
             assert!(step_and_check(&mut sim, 40).is_none(), "{}: validation error while stepping", b.id);
             assert_eq!(sim.frame(), 40);
@@ -556,18 +595,65 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "needs a GPU"]
-    fn bad_rule_is_rejected_and_old_pipeline_stays() {
+    fn bad_shader_is_rejected_and_both_old_pipelines_stay() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[2]);
         let (rule, render) = assembled_for(&p.rule, &p.render);
         let Some(mut sim) = sim_with(config(Mode::TwoD, 32, 32)) else { return };
-        sim.set_rule(ShaderFile::Rule, &rule).unwrap();
-        sim.set_render(ShaderFile::Render, &render).unwrap();
-        let (bad, _) = assembled_for("fn rule(pos: vec2<u32>) -> vec4<f32> { return bogus(; }", &p.render);
-        let errs = sim.set_rule(ShaderFile::Rule, &bad).unwrap_err();
-        assert_eq!(errs[0].line, 1);
-        assert!(sim.has_pipelines(), "a failed build must not remove the live pipeline");
+        sim.set_pipelines(&rule, &render).unwrap();
+        let (bad_rule, _) = assembled_for("fn rule(pos: vec2<u32>) -> vec4<f32> { return bogus(; }", &p.render);
+        let errs = sim.set_pipelines(&bad_rule, &render).unwrap_err();
+        assert_eq!((errs[0].file, errs[0].line), (ShaderFile::Rule, 1));
+        let (_, bad_render) = assembled_for(&p.rule, "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return 1.0; }");
+        let errs = sim.set_pipelines(&rule, &bad_render).unwrap_err();
+        assert_eq!(errs[0].file, ShaderFile::Render);
+        assert!(sim.has_pipelines(), "a failed build must not remove the live pipelines");
         assert!(step_and_check(&mut sim, 3).is_none());
+    }
+
+    /// Reads a whole `rgba32float` texture back to the CPU (width * 16 bytes must be a multiple of 256).
+    fn read_back(sim: &Simulation, which: usize) -> Vec<f32> {
+        let (w, h) = (sim.config.width, sim.config.height);
+        let bytes = (w * h * 16) as u64;
+        let buf = sim.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &sim.textures.tex[which], mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        sim.queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+        let view = slice.get_mapped_range().expect("buffer mapped");
+        let data: Vec<f32> = bytemuck::cast_slice(&view[..]).to_vec();
+        data
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn reset_leaves_no_stale_rows_in_the_second_texture() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[0]);
+        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let Some(mut sim) = sim_with(config(Mode::OneD, 16, 4)) else { return };
+        sim.set_pipelines(&rule, &render).unwrap();
+        upload_default_params(&mut sim, &p.rule, &p.render);
+        assert!(step_and_check(&mut sim, 3).is_none());
+        // Sanity: rule 30 from a single cell must have produced live cells in the other texture.
+        assert!(read_back(&sim, 1)[16 * 4..].iter().step_by(4).any(|&r| r > 0.5), "steps produced nothing");
+        sim.reconfigure(config(Mode::OneD, 16, 4)); // same size: textures are reused
+        let a = read_back(&sim, 0);
+        let b = read_back(&sim, 1);
+        assert_eq!(a, b, "both textures must hold the init pattern after a reset");
+        assert!(a[4 * 8] > 0.5, "row 0 centre cell is set");
+        assert!(a[16 * 4..].chunks(4).all(|px| px[0] == 0.0), "rows below the head are blank");
     }
 
     #[test]
@@ -578,8 +664,7 @@ mod gpu_tests {
         let (rule, render) = assembled_for(&p.rule, &p.render);
         for h in [1u32, 2, 5] {
             let Some(mut sim) = sim_with(config(Mode::OneD, 16, h)) else { return };
-            sim.set_rule(ShaderFile::Rule, &rule).unwrap();
-            sim.set_render(ShaderFile::Render, &render).unwrap();
+            sim.set_pipelines(&rule, &render).unwrap();
             assert!(step_and_check(&mut sim, h + 7).is_none(), "height {h}: validation error");
         }
     }

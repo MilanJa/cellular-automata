@@ -63,9 +63,10 @@ pub fn tokenize(src: &str) -> Vec<(TokenKind, &str)> {
                 TokenKind::Comment
             }
         } else if c.is_whitespace() {
-            while i < src.len() && (bytes[i] as char).is_whitespace() {
-                i += 1;
-            }
+            i += rest
+                .char_indices()
+                .find(|(_, ch)| !ch.is_whitespace())
+                .map_or(rest.len(), |(j, _)| j);
             TokenKind::Whitespace
         } else if c == '@' {
             i += 1;
@@ -210,5 +211,12 @@ mod tests {
         assert!(!job.sections.is_empty());
         assert!(job.sections.len() <= tokenize(src).len());
         assert_eq!(job.sections.last().unwrap().byte_range.end, egui::text::ByteIndex(src.len()));
+    }
+
+    #[test]
+    fn multibyte_whitespace_terminates_and_covers_source() {
+        let src = "let\u{a0}x = 1; // caf\u{e9}\u{2003}done\n";
+        let joined: String = tokenize(src).iter().map(|(_, s)| *s).collect();
+        assert_eq!(joined, src);
     }
 }
