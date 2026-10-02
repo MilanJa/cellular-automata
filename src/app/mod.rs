@@ -102,6 +102,7 @@ impl App {
             launched: web_time::Instant::now(),
         };
         app.state.saved_presets = platform::list_saved();
+        app.state.modulations = preset.meta.modulation.clone();
         app.apply_shaders_with_toml(&toml_params);
         if let Some(msg) = start_error {
             app.report(msg);

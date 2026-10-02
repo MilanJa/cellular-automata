@@ -114,4 +114,14 @@ mod tests {
         assert_eq!(values["rule_number"], ParamValue::I32(110));
         assert!(!values.contains_key("ghost"));
     }
+
+    #[test]
+    fn neon_life_ships_with_a_glow_modulation_on_a_declared_param() {
+        let b = BUILTINS.iter().find(|b| b.id == "neon_life").unwrap();
+        let p = load_builtin(b);
+        let m = p.meta.modulation.get("glow").expect("glow modulation");
+        assert!(m.freq > 0.0 && m.amount > 0.0);
+        let specs = parse_params(&p.render).unwrap();
+        assert!(specs.iter().any(|s| s.name == "glow"));
+    }
 }
