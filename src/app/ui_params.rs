@@ -60,11 +60,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     if changed {
+        app.state.modified = true;
         app.push_params();
     }
 
     ui.separator();
     ui.heading("Grid");
+    let before = app.state.pending.clone();
     let p = &mut app.state.pending;
     egui::Grid::new("grid-settings").num_columns(2).show(ui, |ui| {
         ui.label("mode");
@@ -108,6 +110,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.end_row();
     });
+    if app.state.pending != before {
+        app.state.modified = true;
+    }
     if ui.button("Apply grid settings & reset").clicked() {
         app.apply_settings_and_reset();
     }

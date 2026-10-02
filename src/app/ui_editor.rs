@@ -12,14 +12,14 @@ fn char_index_of_line(text: &str, line: usize) -> usize {
 }
 
 fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
-    let dirty = app.state.editor.dirty;
+    let dirty = app.state.editor.is_dirty(file);
     let header = format!("{title}{}", if dirty { " *" } else { "" });
     egui::CollapsingHeader::new(header).default_open(true).show(ui, |ui| {
         ui.horizontal(|ui| {
             if ui.button("Apply (Ctrl+Enter)").clicked() {
                 app.apply_shaders();
             }
-            let n_err = app.state.errors.iter().filter(|e| e.file == file).count();
+            let n_err = app.state.errors.iter().filter(|e| e.shader_file() == Some(file)).count();
             if n_err > 0 {
                 ui.colored_label(egui::Color32::from_rgb(230, 90, 90), format!("{n_err} error(s)"));
             }
@@ -53,7 +53,8 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
             .layouter(&mut lay)
             .show(ui);
         if out.response.changed() {
-            app.state.editor.dirty = true;
+            app.state.editor.mark_dirty(file);
+            app.state.modified = true;
         }
     });
 }

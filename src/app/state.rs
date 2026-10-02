@@ -20,22 +20,84 @@ pub const MAX_GRID_SIZE: u32 = 4096;
 pub enum PresetSource {
     Builtin(usize),
     Disk(PathBuf),
-    Unsaved,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EditorState {
     pub rule: String,
     pub render: String,
-    /// True when an editor changed since the last successful apply.
-    pub dirty: bool,
+    /// True when the rule editor changed since the last successful apply.
+    pub rule_dirty: bool,
+    /// True when the render editor changed since the last successful apply.
+    pub render_dirty: bool,
+}
+
+impl EditorState {
+    pub fn mark_dirty(&mut self, file: ShaderFile) {
+        match file {
+            ShaderFile::Rule => self.rule_dirty = true,
+            ShaderFile::Render => self.render_dirty = true,
+        }
+    }
+
+    pub fn is_dirty(&self, file: ShaderFile) -> bool {
+        match file {
+            ShaderFile::Rule => self.rule_dirty,
+            ShaderFile::Render => self.render_dirty,
+        }
+    }
+
+    pub fn any_dirty(&self) -> bool {
+        self.rule_dirty || self.render_dirty
+    }
+
+    pub fn clear_dirty(&mut self) {
+        self.rule_dirty = false;
+        self.render_dirty = false;
+    }
+}
+
+/// One line in the error panel: either a located shader error or a general message.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Diagnostic {
+    Shader(ShaderError),
+    General(String),
+}
+
+impl Diagnostic {
+    pub fn text(&self) -> String {
+        match self {
+            Diagnostic::Shader(e) => {
+                format!("{}:{}:{}  {}", e.file.label(), e.line, e.column, e.message)
+            }
+            Diagnostic::General(m) => m.clone(),
+        }
+    }
+
+    /// Where a click should take the cursor, if anywhere.
+    pub fn location(&self) -> Option<(ShaderFile, usize)> {
+        match self {
+            Diagnostic::Shader(e) => Some((e.file, e.line)),
+            Diagnostic::General(_) => None,
+        }
+    }
+
+    pub fn shader_file(&self) -> Option<ShaderFile> {
+        self.location().map(|(f, _)| f)
+    }
+}
+
+pub fn diagnostics_from(errors: Vec<ShaderError>) -> Vec<Diagnostic> {
+    errors.into_iter().map(Diagnostic::Shader).collect()
 }
 
 pub struct AppState {
     pub editor: EditorState,
     pub specs: Vec<ParamSpec>,
     pub values: BTreeMap<String, ParamValue>,
-    pub errors: Vec<ShaderError>,
+    pub errors: Vec<Diagnostic>,
+    /// True when anything savable changed since the preset was loaded or saved.
+    pub modified: bool,
     pub playing: bool,
     pub step_once: bool,
     pub steps_per_frame: u32,
@@ -63,6 +125,7 @@ impl AppState {
             specs,
             values,
             errors: Vec::new(),
+            modified: false,
             playing: true,
             step_once: false,
             steps_per_frame: steps_per_frame.max(1),
@@ -108,8 +171,11 @@ pub fn preset_to_state(
     preset: &Preset,
 ) -> (EditorState, SimConfig, u32, BTreeMap<String, toml::Value>) {
     let m = &preset.meta;
-    let editor =
-        EditorState { rule: preset.rule.clone(), render: preset.render.clone(), dirty: false };
+    let editor = EditorState {
+        rule: preset.rule.clone(),
+        render: preset.render.clone(),
+        ..Default::default()
+    };
     let init = match &m.init {
         InitPattern::Random { density } => InitPattern::Random {
             density: if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.5 },
@@ -218,7 +284,7 @@ mod tests {
         let editor = EditorState {
             rule: "// @param x: f64 = 1\nfn rule(pos: vec2<u32>) -> vec4<f32> { return vec4<f32>(0.0); }".into(),
             render: "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return cell; }".into(),
-            dirty: false,
+            ..Default::default()
         };
         let errs = build_shaders(&editor).unwrap_err();
         assert_eq!(errs[0].file, ShaderFile::Rule);
@@ -230,7 +296,7 @@ mod tests {
         let editor = EditorState {
             rule: "fn rule(pos: vec2<u32>) -> vec4<f32> { return 1.0; }".into(),
             render: "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return 1.0; }".into(),
-            dirty: false,
+            ..Default::default()
         };
         let errs = build_shaders(&editor).unwrap_err();
         assert!(errs.iter().any(|e| e.file == ShaderFile::Rule));
@@ -310,5 +376,30 @@ mod tests {
             crate::preset::InitPattern::Random { density } => assert!((0.0..=1.0).contains(&density)),
             other => panic!("unexpected init {other:?}"),
         }
+    }
+
+    #[test]
+    fn diagnostic_text_and_location() {
+        let d = Diagnostic::Shader(ShaderError { file: ShaderFile::Render, line: 3, column: 7, message: "boom".into() });
+        assert_eq!(d.text(), "render.wgsl:3:7  boom");
+        assert_eq!(d.location(), Some((ShaderFile::Render, 3)));
+        let g = Diagnostic::General("save failed".into());
+        assert_eq!(g.text(), "save failed");
+        assert_eq!(g.location(), None);
+        let list = diagnostics_from(vec![ShaderError { file: ShaderFile::Rule, line: 1, column: 1, message: "x".into() }]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].location(), Some((ShaderFile::Rule, 1)));
+    }
+
+    #[test]
+    fn editor_dirty_flags_are_per_file() {
+        let mut e = EditorState::default();
+        assert!(!e.any_dirty());
+        e.mark_dirty(ShaderFile::Render);
+        assert!(!e.is_dirty(ShaderFile::Rule));
+        assert!(e.is_dirty(ShaderFile::Render));
+        assert!(e.any_dirty());
+        e.clear_dirty();
+        assert!(!e.any_dirty());
     }
 }

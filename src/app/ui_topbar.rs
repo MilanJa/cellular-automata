@@ -5,9 +5,10 @@ use crate::preset::Preset;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        let label = match &app.state.source {
-            PresetSource::Unsaved => format!("{} *", app.state.preset_name),
-            _ => app.state.preset_name.clone(),
+        let label = if app.state.modified {
+            format!("{} *", app.state.preset_name)
+        } else {
+            app.state.preset_name.clone()
         };
         let mut to_load: Option<(Preset, PresetSource)> = None;
         let mut load_error: Option<String> = None;
@@ -59,7 +60,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.state.step_once = true;
         }
         ui.label("steps/frame");
-        ui.add(egui::DragValue::new(&mut app.state.steps_per_frame).range(1..=256));
+        if ui.add(egui::DragValue::new(&mut app.state.steps_per_frame).range(1..=256)).changed() {
+            app.state.modified = true;
+        }
         if ui.button("↺ Reset").on_hover_text("Apply grid settings and re-initialise").clicked() {
             app.apply_settings_and_reset();
         }

@@ -11,14 +11,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for e in app.state.errors.clone() {
-            let text = format!("{}:{}:{}  {}", e.file.label(), e.line, e.column, e.message);
-            let label = egui::Label::new(
-                egui::RichText::new(text).color(egui::Color32::from_rgb(230, 110, 110)).monospace(),
-            )
-            .sense(egui::Sense::click());
-            if ui.add(label).on_hover_text("Click to jump to this line").clicked() {
-                app.pending_cursor = Some((e.file, e.line));
+        for d in app.state.errors.clone() {
+            let rich = egui::RichText::new(d.text()).color(egui::Color32::from_rgb(230, 110, 110)).monospace();
+            match d.location() {
+                Some(loc) => {
+                    let label = egui::Label::new(rich).sense(egui::Sense::click());
+                    if ui.add(label).on_hover_text("Click to jump to this line").clicked() {
+                        app.pending_cursor = Some(loc);
+                    }
+                }
+                None => {
+                    ui.label(rich);
+                }
             }
         }
     });

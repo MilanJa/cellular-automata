@@ -13,12 +13,12 @@ use std::sync::{Arc, Mutex};
 use crate::preset::builtin::{load_builtin, BUILTINS};
 use crate::preset::{preset_exists, scan_presets_dir, slug, Preset};
 use crate::shader::params::pack_params;
-use crate::shader::validate::{ShaderError, ShaderFile};
+use crate::shader::validate::ShaderFile;
 use crate::sim::Simulation;
 use crate::viewport::show_viewport;
 use state::{
-    build_shaders, prepare_preset_load, preset_to_state, resolve_values, state_to_preset, AppState,
-    PresetSource,
+    build_shaders, diagnostics_from, prepare_preset_load, preset_to_state, resolve_values,
+    state_to_preset, AppState, Diagnostic, PresetSource,
 };
 
 const PRESETS_DIR: &str = "presets";
@@ -85,14 +85,14 @@ impl App {
                 for e in &mut errors {
                     e.message = format!("[{}] {}", preset.meta.name, e.message);
                 }
-                self.state.errors = errors;
+                self.state.errors = diagnostics_from(errors);
                 return;
             }
         };
         let mut sim = self.sim.lock().unwrap();
         if let Err(errors) = sim.set_pipelines(&loaded.rule, &loaded.render) {
             drop(sim);
-            self.state.errors = errors;
+            self.state.errors = diagnostics_from(errors);
             return;
         }
         sim.reconfigure(loaded.config.clone());
@@ -106,6 +106,7 @@ impl App {
         self.state.values = resolve_values(&loaded.specs, &loaded.toml_params, &BTreeMap::new());
         self.state.specs = loaded.specs;
         self.state.errors.clear();
+        self.state.modified = false;
         self.state.started = std::time::Instant::now();
         self.push_params();
     }
@@ -116,15 +117,15 @@ impl App {
 
     fn apply_shaders_with_toml(&mut self, toml_params: &BTreeMap<String, toml::Value>) {
         match build_shaders(&self.state.editor) {
-            Err(errors) => self.state.errors = errors,
+            Err(errors) => self.state.errors = diagnostics_from(errors),
             Ok((specs, rule, render)) => {
                 let result = self.sim.lock().unwrap().set_pipelines(&rule, &render);
                 match result {
-                    Err(errors) => self.state.errors = errors,
+                    Err(errors) => self.state.errors = diagnostics_from(errors),
                     Ok(()) => {
                         self.state.values = resolve_values(&specs, toml_params, &self.state.values);
                         self.state.specs = specs;
-                        self.state.editor.dirty = false;
+                        self.state.editor.clear_dirty();
                         self.state.errors.clear();
                         self.push_params();
                     }
@@ -183,6 +184,7 @@ impl App {
         match preset.save_dir(dir) {
             Ok(()) => {
                 self.state.source = PresetSource::Disk(dir.to_path_buf());
+                self.state.modified = false;
                 self.state.disk_presets = scan_presets_dir(Path::new(PRESETS_DIR));
             }
             Err(e) => self.report(format!("save failed: {e:#}")),
@@ -195,7 +197,7 @@ impl App {
 
     /// Shows a non-shader message in the error panel.
     pub(crate) fn report(&mut self, message: String) {
-        self.state.errors = vec![ShaderError { file: ShaderFile::Rule, line: 1, column: 1, message }];
+        self.state.errors = vec![Diagnostic::General(message)];
     }
 }
 
