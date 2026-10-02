@@ -32,8 +32,7 @@ pub fn detect_stuck(history: &[StatsSample], window: usize) -> Option<Stuck> {
         return Some(Stuck::Static);
     }
     (1..=MAX_PERIOD.min(window / 2)).find_map(|p| {
-        let repeats = (p..window)
-            .all(|i| w[i].population == w[i - p].population && w[i].changed == w[i - p].changed);
+        let repeats = (p..window).all(|i| w[i].population == w[i - p].population && w[i].changed == w[i - p].changed);
         repeats.then_some(Stuck::Periodic(p as u32))
     })
 }

@@ -1,5 +1,7 @@
 //! Presets and templates embedded in the binary from the `presets/` folder.
 
+use std::sync::OnceLock;
+
 use super::{Preset, PresetMeta};
 
 pub struct Builtin {
@@ -8,6 +10,14 @@ pub struct Builtin {
     pub rule: &'static str,
     pub render: &'static str,
     pub post: Option<&'static str>,
+    /// Display name, parsed from `meta_toml` on first use so menus do not re-parse TOML per frame.
+    name: OnceLock<String>,
+}
+
+impl Builtin {
+    pub fn name(&self) -> &str {
+        self.name.get_or_init(|| load_builtin(self).meta.name)
+    }
 }
 
 macro_rules! embedded {
@@ -18,6 +28,7 @@ macro_rules! embedded {
             rule: include_str!(concat!("../../presets/", $dir, "/rule.wgsl")),
             render: include_str!(concat!("../../presets/", $dir, "/render.wgsl")),
             post: None,
+            name: OnceLock::new(),
         }
     };
     ($id:literal, $dir:literal, post) => {
@@ -27,12 +38,14 @@ macro_rules! embedded {
             rule: include_str!(concat!("../../presets/", $dir, "/rule.wgsl")),
             render: include_str!(concat!("../../presets/", $dir, "/render.wgsl")),
             post: Some(include_str!(concat!("../../presets/", $dir, "/post.wgsl"))),
+            name: OnceLock::new(),
         }
     };
 }
 
-/// Ready-to-run examples, listed first in the preset dropdown.
-pub const BUILTINS: &[Builtin] = &[
+/// Ready-to-run examples, listed first in the preset dropdown. A `static` (not a `const`) so
+/// the cached names live in one place.
+pub static BUILTINS: [Builtin; 7] = [
     embedded!("rule30", "rule30"),
     embedded!("rule110", "rule110"),
     embedded!("life", "life"),
@@ -43,7 +56,7 @@ pub const BUILTINS: &[Builtin] = &[
 ];
 
 /// Commented starting points for new work, offered by the "New" menu.
-pub const TEMPLATES: &[Builtin] = &[
+pub static TEMPLATES: [Builtin; 9] = [
     embedded!("binary2d", "templates/binary2d"),
     embedded!("lifelike", "templates/lifelike"),
     embedded!("elementary1d", "templates/elementary1d"),
@@ -56,34 +69,35 @@ pub const TEMPLATES: &[Builtin] = &[
 ];
 
 pub fn load_builtin(b: &Builtin) -> Preset {
-    let meta: PresetMeta = toml::from_str(b.meta_toml)
-        .unwrap_or_else(|e| panic!("embedded preset {} has invalid preset.toml: {e}", b.id));
+    let meta: PresetMeta =
+        toml::from_str(b.meta_toml).unwrap_or_else(|e| panic!("embedded preset {} has invalid preset.toml: {e}", b.id));
     Preset {
         meta,
         rule: b.rule.to_string(),
         render: b.render.to_string(),
         post: b.post.map(str::to_string),
         rule_b: None,
+        layer_b: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shader::assemble::{assemble_post, assemble_render, assemble_rule, DEFAULT_POST};
+    use crate::shader::assemble::{DEFAULT_POST, assemble_post, assemble_render, assemble_rule};
     use crate::shader::params::{merge_params, params_wgsl, parse_params};
-    use crate::shader::validate::{validate, ShaderFile};
+    use crate::shader::validate::{ShaderFile, validate};
 
     fn check_all(list: &[Builtin], what: &str) {
         for b in list {
             let preset = load_builtin(b);
-            let rule_params = parse_params(&preset.rule)
-                .unwrap_or_else(|e| panic!("{what} {}: rule params: {:?}", b.id, e));
-            let render_params = parse_params(&preset.render)
-                .unwrap_or_else(|e| panic!("{what} {}: render params: {:?}", b.id, e));
+            let rule_params =
+                parse_params(&preset.rule).unwrap_or_else(|e| panic!("{what} {}: rule params: {:?}", b.id, e));
+            let render_params =
+                parse_params(&preset.render).unwrap_or_else(|e| panic!("{what} {}: render params: {:?}", b.id, e));
             let post_src = preset.post.clone().unwrap_or_else(|| DEFAULT_POST.to_string());
-            let post_params = parse_params(&post_src)
-                .unwrap_or_else(|e| panic!("{what} {}: post params: {:?}", b.id, e));
+            let post_params =
+                parse_params(&post_src).unwrap_or_else(|e| panic!("{what} {}: post params: {:?}", b.id, e));
             let specs = merge_params(rule_params, render_params)
                 .and_then(|s| merge_params(s, post_params))
                 .unwrap_or_else(|e| panic!("{what} {}: merge: {:?}", b.id, e));
@@ -124,12 +138,19 @@ mod tests {
 
     #[test]
     fn every_builtin_parses_and_validates() {
-        check_all(BUILTINS, "builtin");
+        check_all(&BUILTINS, "builtin");
+    }
+
+    #[test]
+    fn builtin_names_come_from_their_toml_and_are_cached() {
+        let life = BUILTINS.iter().find(|b| b.id == "life").unwrap();
+        assert_eq!(life.name(), load_builtin(life).meta.name);
+        assert!(std::ptr::eq(life.name(), life.name()), "the same cached string is returned");
     }
 
     #[test]
     fn every_template_parses_and_validates() {
-        check_all(TEMPLATES, "template");
+        check_all(&TEMPLATES, "template");
     }
 
     #[test]

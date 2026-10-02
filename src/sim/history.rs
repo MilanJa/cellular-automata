@@ -95,22 +95,6 @@ impl SnapshotRing {
         let slot = (self.oldest_slot() + index) % self.capacity;
         self.slots[slot].map(|m| (slot, m))
     }
-
-    /// Changes the capacity, keeping the newest snapshots. The caller must move texture
-    /// contents accordingly; the returned list maps each kept snapshot's old slot to its new slot.
-    pub fn set_capacity(&mut self, capacity: usize) -> Vec<(usize, usize)> {
-        let capacity = capacity.max(1);
-        let kept: Vec<(usize, SnapshotMeta)> =
-            self.iter_oldest_first().collect::<Vec<_>>().into_iter().rev().take(capacity).rev().collect();
-        let mut fresh = SnapshotRing::new(capacity);
-        let mut moves = Vec::with_capacity(kept.len());
-        for (old_slot, meta) in kept {
-            let new_slot = fresh.push(meta);
-            moves.push((old_slot, new_slot));
-        }
-        *self = fresh;
-        moves
-    }
 }
 
 #[cfg(test)]
@@ -156,19 +140,5 @@ mod tests {
         assert_eq!(ring.get(3), None);
         ring.clear();
         assert!(ring.is_empty());
-    }
-
-    #[test]
-    fn ring_capacity_can_shrink_and_grow() {
-        let mut ring = SnapshotRing::new(4);
-        for s in 0..4 {
-            ring.push(SnapshotMeta { step: s * 2, row: 1 });
-        }
-        ring.set_capacity(2);
-        let steps: Vec<u32> = ring.iter_oldest_first().map(|(_, m)| m.step).collect();
-        assert_eq!(steps, vec![4, 6], "keeps the newest when shrinking");
-        ring.set_capacity(5);
-        assert_eq!(ring.len(), 2);
-        assert_eq!(ring.capacity(), 5);
     }
 }

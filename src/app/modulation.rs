@@ -195,7 +195,7 @@ pub fn modulated_values_with_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shader::params::{parse_params, ParamValue};
+    use crate::shader::params::{ParamValue, parse_params};
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
@@ -281,11 +281,15 @@ mod tests {
 
     #[test]
     fn modulated_values_only_touch_modulated_params() {
-        let specs = parse_params("// @param a: f32 = 0.5 range 0.0 .. 1.0\n// @param b: f32 = 0.2 range 0.0 .. 1.0\n").unwrap();
+        let specs =
+            parse_params("// @param a: f32 = 0.5 range 0.0 .. 1.0\n// @param b: f32 = 0.2 range 0.0 .. 1.0\n").unwrap();
         let values: BTreeMap<_, _> =
             [("a".to_string(), ParamValue::F32(0.5)), ("b".to_string(), ParamValue::F32(0.2))].into();
         let mut mods = BTreeMap::new();
-        mods.insert("a".to_string(), Modulation { wave: Wave::Square, freq: 1.0, amount: 0.2, phase: 0.0, follow_sim: true });
+        mods.insert(
+            "a".to_string(),
+            Modulation { wave: Wave::Square, freq: 1.0, amount: 0.2, phase: 0.0, follow_sim: true },
+        );
         // Wall time would give the negative half; sim time (0.1 s) gives the positive half.
         let out = modulated_values(&specs, &values, &mods, 0.6, 0.1);
         assert_eq!(out["a"], ParamValue::F32(0.7));
@@ -298,7 +302,10 @@ mod tests {
         let specs = parse_params("// @param a: f32 = 0.2 range 0.0 .. 1.0\n").unwrap();
         let values: BTreeMap<_, _> = [("a".to_string(), ParamValue::F32(0.2))].into();
         let mut mods = BTreeMap::new();
-        mods.insert("a".to_string(), Modulation { wave: Wave::AudioLow, freq: 1.0, amount: 0.5, phase: 0.0, follow_sim: false });
+        mods.insert(
+            "a".to_string(),
+            Modulation { wave: Wave::AudioLow, freq: 1.0, amount: 0.5, phase: 0.0, follow_sim: false },
+        );
         let levels = AudioLevels { level: 0.9, low: 0.5, mid: 0.1, high: 0.0 };
         let out = modulated_values_with_audio(&specs, &values, &mods, 0.0, 0.0, &levels);
         assert_eq!(out["a"], ParamValue::F32(0.45), "centre + amount * span * low");

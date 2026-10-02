@@ -1,5 +1,5 @@
-use super::theme;
 use super::App;
+use super::theme;
 use crate::app::modulation::{Modulation, Wave};
 use crate::preset::{InitPattern, Mode};
 use crate::shader::params::{ParamSpec, ParamType, ParamValue};
@@ -30,7 +30,11 @@ fn param_widget(ui: &mut egui::Ui, spec: &ParamSpec, value: &mut ParamValue) -> 
         ParamValue::Bool(b) => ui.checkbox(b, "").changed(),
         ParamValue::Vec2(a) => sliders(ui, a, spec.range),
         ParamValue::Vec3(a) => {
-            if spec.color { ui.color_edit_button_rgb(a).changed() } else { sliders(ui, a, spec.range) }
+            if spec.color {
+                ui.color_edit_button_rgb(a).changed()
+            } else {
+                sliders(ui, a, spec.range)
+            }
         }
         ParamValue::Vec4(a) => {
             if spec.color {
@@ -58,12 +62,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
     if app.state.specs.is_empty() {
         ui.label(
-            egui::RichText::new("Declare params in a shader with `// @param name: f32 = 0.5 range 0 .. 1`")
-                .weak(),
+            egui::RichText::new("Declare params in a shader with `// @param name: f32 = 0.5 range 0 .. 1`").weak(),
         );
     }
     let mut changed = false;
-    let live = if app.state.modulations.is_empty() { None } else { Some(app.effective_values()) };
+    // Computed once per frame by `push_params`; `None` while nothing is modulated.
+    let live = app.live_values.clone();
     egui::Grid::new("params").num_columns(2).striped(true).show(ui, |ui| {
         for spec in app.state.specs.clone() {
             ui.label(&spec.name);
@@ -175,7 +179,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.toggle_midi();
         }
         if let Some(rx) = &app.midi {
-            let ports = if rx.port_names.is_empty() { "waiting for permission...".to_string() } else { rx.port_names.join(", ") };
+            let ports = if rx.port_names.is_empty() {
+                "waiting for permission...".to_string()
+            } else {
+                rx.port_names.join(", ")
+            };
             ui.label(egui::RichText::new(ports).weak());
         }
     });
@@ -210,10 +218,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     theme::section(ui, "Layer B");
-    ui.label(
-        egui::RichText::new("A second automaton running alongside; shaders read it with other(x, y).")
-            .weak(),
-    );
+    ui.label(egui::RichText::new("A second automaton running alongside; shaders read it with other(x, y).").weak());
     ui.horizontal(|ui| {
         let current = app.layer_b_name().unwrap_or_else(|| "none".to_string());
         let mut pick: Option<Option<crate::preset::Preset>> = None;
@@ -221,10 +226,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if ui.selectable_label(app.layer_b.is_none(), "none").clicked() {
                 pick = Some(None);
             }
-            for b in crate::preset::builtin::BUILTINS {
-                let p = crate::preset::builtin::load_builtin(b);
-                if ui.selectable_label(false, &p.meta.name).clicked() {
-                    pick = Some(Some(p));
+            for b in crate::preset::builtin::BUILTINS.iter() {
+                if ui.selectable_label(false, b.name()).clicked() {
+                    pick = Some(Some(crate::preset::builtin::load_builtin(b)));
                 }
             }
             for (name, location) in app.state.saved_presets.clone() {
@@ -238,6 +242,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         if let Some(choice) = pick {
             app.set_layer_b(choice);
+            app.state.modified = true; // layer B is saved with the preset
         }
     });
 
@@ -349,8 +354,8 @@ fn modulation_button(
     };
     // Keep the menu open while its buttons are clicked (egui closes menus on any button click
     // by default); only a click outside dismisses it.
-    let config = egui::containers::menu::MenuConfig::new()
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let config =
+        egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     egui::containers::menu::MenuButton::new(label).config(config).ui(ui, |ui| {
         ui.set_min_width(300.0);
         changed |= midi_row(app, ui, spec);
@@ -385,9 +390,7 @@ fn modulation_button(
                     ui.end_row();
                     if !m.wave.is_audio() {
                         ui.label("freq (Hz)");
-                        changed |= ui
-                            .add(egui::Slider::new(&mut m.freq, 0.01..=5.0).logarithmic(true))
-                            .changed();
+                        changed |= ui.add(egui::Slider::new(&mut m.freq, 0.01..=5.0).logarithmic(true)).changed();
                         ui.end_row();
                     }
                     ui.label("amount");
@@ -398,9 +401,7 @@ fn modulation_button(
                         changed |= ui.add(egui::Slider::new(&mut m.phase, 0.0..=1.0)).changed();
                         ui.end_row();
                         ui.label("clock");
-                        changed |= ui
-                            .checkbox(&mut m.follow_sim, "follow simulation (pauses with it)")
-                            .changed();
+                        changed |= ui.checkbox(&mut m.follow_sim, "follow simulation (pauses with it)").changed();
                         ui.end_row();
                     }
                 });

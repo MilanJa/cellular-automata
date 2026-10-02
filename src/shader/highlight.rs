@@ -20,23 +20,116 @@ pub enum TokenKind {
 }
 
 const KEYWORDS: &[&str] = &[
-    "fn", "let", "var", "const", "return", "if", "else", "for", "while", "loop", "break",
-    "continue", "struct", "switch", "case", "default", "discard", "true", "false", "override",
-    "continuing", "alias",
+    "fn",
+    "let",
+    "var",
+    "const",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "loop",
+    "break",
+    "continue",
+    "struct",
+    "switch",
+    "case",
+    "default",
+    "discard",
+    "true",
+    "false",
+    "override",
+    "continuing",
+    "alias",
 ];
 const TYPES: &[&str] = &[
-    "f32", "i32", "u32", "bool", "f16", "vec2", "vec3", "vec4", "mat2x2", "mat3x3", "mat4x4",
-    "array", "texture_2d", "texture_storage_2d", "sampler", "rgba32float", "write", "read",
-    "read_write", "uniform", "storage",
+    "f32",
+    "i32",
+    "u32",
+    "bool",
+    "f16",
+    "vec2",
+    "vec3",
+    "vec4",
+    "mat2x2",
+    "mat3x3",
+    "mat4x4",
+    "array",
+    "texture_2d",
+    "texture_storage_2d",
+    "sampler",
+    "rgba32float",
+    "write",
+    "read",
+    "read_write",
+    "uniform",
+    "storage",
 ];
 const BUILTINS: &[&str] = &[
-    "textureLoad", "textureStore", "select", "clamp", "min", "max", "abs", "floor", "ceil",
-    "fract", "round", "sin", "cos", "tan", "atan2", "exp", "log", "pow", "sqrt", "dot", "cross",
-    "length", "normalize", "distance", "mix", "smoothstep", "step", "sign", "any", "all",
-    "cell", "prev_cell", "hash", "rand", "wrap", "noise", "alive", "prev_alive", "neighbours",
-    "neighbours4", "moore_sum", "laplacian", "on", "off", "on_if", "gray", "rgb", "hsv", "palette",
-    "cell_at", "scene", "prev", "scene_px", "neighbours_hex", "neighbours_tri", "neighbours_tri12",
-    "tri_is_up", "hex_cell", "hex_local", "hex_dist", "tri_cell", "other", "other_alive",
+    "textureLoad",
+    "textureStore",
+    "select",
+    "clamp",
+    "min",
+    "max",
+    "abs",
+    "floor",
+    "ceil",
+    "fract",
+    "round",
+    "sin",
+    "cos",
+    "tan",
+    "atan2",
+    "exp",
+    "log",
+    "pow",
+    "sqrt",
+    "dot",
+    "cross",
+    "length",
+    "normalize",
+    "distance",
+    "mix",
+    "smoothstep",
+    "step",
+    "sign",
+    "any",
+    "all",
+    "cell",
+    "prev_cell",
+    "hash",
+    "rand",
+    "wrap",
+    "noise",
+    "alive",
+    "prev_alive",
+    "neighbours",
+    "neighbours4",
+    "moore_sum",
+    "laplacian",
+    "on",
+    "off",
+    "on_if",
+    "gray",
+    "rgb",
+    "hsv",
+    "palette",
+    "cell_at",
+    "scene",
+    "prev",
+    "scene_px",
+    "neighbours_hex",
+    "neighbours_tri",
+    "neighbours_tri12",
+    "tri_is_up",
+    "hex_cell",
+    "hex_local",
+    "hex_dist",
+    "tri_cell",
+    "other",
+    "other_alive",
 ];
 
 fn is_ident_start(c: char) -> bool {
@@ -66,10 +159,7 @@ pub fn tokenize(src: &str) -> Vec<(TokenKind, &str)> {
                 TokenKind::Comment
             }
         } else if c.is_whitespace() {
-            i += rest
-                .char_indices()
-                .find(|(_, ch)| !ch.is_whitespace())
-                .map_or(rest.len(), |(j, _)| j);
+            i += rest.char_indices().find(|(_, ch)| !ch.is_whitespace()).map_or(rest.len(), |(j, _)| j);
             TokenKind::Whitespace
         } else if c == '@' {
             i += 1;
@@ -77,12 +167,9 @@ pub fn tokenize(src: &str) -> Vec<(TokenKind, &str)> {
                 i += 1;
             }
             TokenKind::Attribute
-        } else if c.is_ascii_digit()
-            || (c == '.' && rest[1..].starts_with(|d: char| d.is_ascii_digit()))
-        {
+        } else if c.is_ascii_digit() || (c == '.' && rest[1..].starts_with(|d: char| d.is_ascii_digit())) {
             i += 1;
-            while i < src.len() && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'.')
-            {
+            while i < src.len() && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'.') {
                 i += 1;
             }
             TokenKind::Number
@@ -125,23 +212,15 @@ fn color(kind: TokenKind, dark: bool) -> Color32 {
         (TokenKind::Number, false) => Color32::from_rgb(150, 110, 20),
         (TokenKind::Attribute, true) => Color32::from_rgb(220, 150, 150),
         (TokenKind::Attribute, false) => Color32::from_rgb(160, 60, 60),
-        (TokenKind::Ident | TokenKind::Punct | TokenKind::Whitespace, true) => {
-            Color32::from_rgb(220, 220, 220)
-        }
-        (TokenKind::Ident | TokenKind::Punct | TokenKind::Whitespace, false) => {
-            Color32::from_rgb(30, 30, 30)
-        }
+        (TokenKind::Ident | TokenKind::Punct | TokenKind::Whitespace, true) => Color32::from_rgb(220, 220, 220),
+        (TokenKind::Ident | TokenKind::Punct | TokenKind::Whitespace, false) => Color32::from_rgb(30, 30, 30),
     }
 }
 
 pub fn highlight_job(src: &str, font_id: FontId, dark: bool) -> LayoutJob {
     let mut job = LayoutJob::default();
     for (kind, text) in tokenize(src) {
-        job.append(
-            text,
-            0.0,
-            TextFormat { font_id: font_id.clone(), color: color(kind, dark), ..Default::default() },
-        );
+        job.append(text, 0.0, TextFormat { font_id: font_id.clone(), color: color(kind, dark), ..Default::default() });
     }
     job
 }
@@ -159,13 +238,10 @@ type HighlightCache = egui::cache::FrameCache<LayoutJob, Highlighter>;
 
 /// Builds a layouter closure for `egui::TextEdit::layouter`. Jobs are cached per frame by egui,
 /// keyed on the source text, so unchanged text is not re-tokenised.
-pub fn layouter<'a>() -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<egui::Galley> + 'a
-{
+pub fn layouter<'a>() -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> Arc<egui::Galley> + 'a {
     move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
         let dark = ui.visuals().dark_mode;
-        let mut job = ui
-            .ctx()
-            .memory_mut(|m| m.caches.cache::<HighlightCache>().get((buf.as_str(), dark)).clone());
+        let mut job = ui.ctx().memory_mut(|m| m.caches.cache::<HighlightCache>().get((buf.as_str(), dark)).clone());
         job.wrap.max_width = wrap_width;
         ui.fonts_mut(|f| f.layout_job(job))
     }

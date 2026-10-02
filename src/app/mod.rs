@@ -5,38 +5,48 @@ mod explorer_ui;
 pub mod modulation;
 pub mod mutate;
 pub mod state;
+pub mod theme;
 mod ui_editor;
 mod ui_errors;
 mod ui_params;
 mod ui_topbar;
-pub mod theme;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crate::platform::{self, SavedLocation};
-use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
-use crate::preset::Preset;
-use crate::shader::params::{pack_params, ParamValue};
-use crate::shader::validate::ShaderFile;
+use web_time::Instant;
+
 use crate::app::modulation::modulated_values_with_audio;
-use crate::audio::analysis::AudioLevels;
+use crate::app::mutate::mutate_values;
 use crate::audio::AudioInput;
+use crate::audio::analysis::AudioLevels;
 use crate::midi::MidiReceiver;
 use crate::midi::mapping::{CcKey, MidiMap, apply_cc};
-use crate::app::mutate::mutate_values;
+use crate::platform::{self, SavedLocation};
+use crate::preset::Preset;
+use crate::preset::builtin::{BUILTINS, TEMPLATES, load_builtin};
+use crate::preset::bundle::{from_bundle, to_bundle};
+use crate::shader::params::{ParamValue, pack_params};
+use crate::shader::validate::ShaderFile;
+use crate::sim::paint::{Stroke, pointer_to_cell};
+use crate::sim::record::{FRAME_BUDGET_BYTES, RecordingSettings, encode_apng, max_frames, recording_filename};
+use crate::sim::seed_image::{RgbaImage, decode_png, image_to_cells};
 use crate::sim::stats::detect_stuck;
-use crate::sim::paint::{pointer_to_cell, Stroke};
-use crate::sim::record::{encode_apng, max_frames, recording_filename, RecordingSettings, FRAME_BUDGET_BYTES};
-use crate::sim::seed_image::{decode_png, image_to_cells, RgbaImage};
-use crate::sim::Simulation;
-use crate::viewport::{show_viewport, LayerB};
+use crate::sim::{GpuContext, SimConfig, Simulation};
+use crate::util::lock;
+use crate::viewport::{LayerB, show_viewport};
 use state::{
-    build_shaders, diagnostics_from, prepare_preset_load, preset_to_state, resolve_values,
-    state_to_preset, AppState, Diagnostic, PresetSource, RateMeter,
+    AppState, PresetSource, RateMeter, build_shaders, prepare_preset_load, preset_to_state, resolve_values,
+    state_to_preset,
 };
 
 const DEFAULT_BUILTIN: usize = 2; // Game of Life
+
+/// How long an informational notice stays in the bottom panel.
+const NOTICE_TTL: Duration = Duration::from_secs(8);
+/// How often the browser draft is refreshed while there are unsaved changes.
+const DRAFT_INTERVAL: Duration = Duration::from_secs(2);
 
 /// What to load when the app opens.
 pub enum Start {
@@ -44,7 +54,7 @@ pub enum Start {
     /// A built-in id or, on the desktop, a preset folder.
     Named(String),
     /// A preset decoded from a share link.
-    Shared(Preset),
+    Shared(Box<Preset>),
 }
 
 /// An animation being captured: frames arrive through the image export path.
@@ -62,7 +72,31 @@ pub(crate) struct SaveDialog {
     pub confirm_overwrite: bool,
 }
 
+/// A non-shader message for the bottom panel. Separate from shader errors, so a save
+/// confirmation never hides a compile error and vice versa.
+#[derive(Debug, Clone)]
+pub(crate) struct Notice {
+    pub text: String,
+    pub level: NoticeLevel,
+    pub at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoticeLevel {
+    /// Fades out by itself.
+    Info,
+    /// Stays until dismissed or replaced.
+    Error,
+}
+
+/// Browser draft persistence: what was last written and when it was last checked.
+struct Drafts {
+    last_text: Option<String>,
+    last_check: Instant,
+}
+
 pub struct App {
+    ctx: Arc<GpuContext>,
     sim: Arc<Mutex<Simulation>>,
     state: AppState,
     /// Set when an error entry is clicked; the matching editor moves its cursor there.
@@ -75,7 +109,7 @@ pub struct App {
     /// Viewport rect from the previous frame, for mapping pointer positions.
     last_viewport: Option<egui::Rect>,
     /// Wall clock for modulations that do not follow simulation time.
-    launched: web_time::Instant,
+    launched: Instant,
     /// The last image used as a seed, kept so mode changes can re-apply it.
     pub(crate) seed_image: Option<RgbaImage>,
     /// Snapshot to restore on the next frame (set by the timeline slider).
@@ -96,6 +130,12 @@ pub struct App {
     /// MIDI input while enabled, and the last knob that moved (for the learn UI).
     pub(crate) midi: Option<MidiReceiver>,
     pub(crate) last_cc: Option<CcKey>,
+    /// Latest non-shader message (saves, imports, failures).
+    pub(crate) notice: Option<Notice>,
+    /// The param values uploaded last, with modulations applied; `None` while nothing is
+    /// modulated. Computed once per frame and shown next to the sliders.
+    pub(crate) live_values: Option<BTreeMap<String, ParamValue>>,
+    drafts: Drafts,
 }
 
 impl App {
@@ -110,16 +150,22 @@ impl App {
     }
 
     pub fn start(cc: &eframe::CreationContext<'_>, start: Start) -> Self {
-        let rs = cc
-            .wgpu_render_state
-            .as_ref()
-            .expect("wgpu render state (the app requires the wgpu backend)");
+        let rs = cc.wgpu_render_state.as_ref().expect("wgpu render state (the app requires the wgpu backend)");
         theme::apply(&cc.egui_ctx);
+        let ctx = GpuContext::new(rs.device.clone(), rs.queue.clone(), rs.target_format);
         let mut start_error = None;
+        let mut restored_draft = false;
         let default = || (load_builtin(&BUILTINS[DEFAULT_BUILTIN]), PresetSource::Builtin(DEFAULT_BUILTIN));
-        let (preset, source) = match start {
-            Start::Default => default(),
-            Start::Shared(p) => (p, PresetSource::Imported),
+        let (mut preset, source) = match start {
+            // A plain open restores unsaved work from the last visit (browser only).
+            Start::Default => match platform::load_draft().and_then(|t| from_bundle(&t).ok()) {
+                Some(p) => {
+                    restored_draft = true;
+                    (p, PresetSource::Imported)
+                }
+                None => default(),
+            },
+            Start::Shared(p) => (*p, PresetSource::Imported),
             Start::Named(id) => match BUILTINS.iter().position(|b| b.id == id) {
                 Some(i) => (load_builtin(&BUILTINS[i]), PresetSource::Builtin(i)),
                 None => {
@@ -134,26 +180,22 @@ impl App {
                 }
             },
         };
+        let layer_b = preset.layer_b.take();
         let (editor, config, spf, toml_params) = preset_to_state(&preset);
-        let sim = Simulation::new(rs.device.clone(), rs.queue.clone(), rs.target_format, config.clone());
-        let state = AppState::from_parts(
-            editor,
-            config,
-            spf,
-            Vec::new(),
-            BTreeMap::new(),
-            preset.meta.name.clone(),
-            source,
-        );
+        let sim = Simulation::new(ctx.clone(), config.clone());
+        let state =
+            AppState::from_parts(editor, config, spf, Vec::new(), BTreeMap::new(), preset.meta.name.clone(), source);
+        let now = Instant::now();
         let mut app = App {
+            ctx,
             sim: Arc::new(Mutex::new(sim)),
             state,
             pending_cursor: None,
-            rate: RateMeter::new(web_time::Instant::now(), 0),
+            rate: RateMeter::new(now, 0),
             save_dialog: None,
             strokes: Vec::new(),
             last_viewport: None,
-            launched: web_time::Instant::now(),
+            launched: now,
             seed_image: None,
             pending_restore: None,
             scrub: None,
@@ -166,13 +208,23 @@ impl App {
             audio_levels: AudioLevels::default(),
             midi: None,
             last_cc: None,
+            notice: None,
+            live_values: None,
+            drafts: Drafts { last_text: None, last_check: now },
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
         app.state.midi_map = MidiMap::from_bindings(preset.meta.midi.clone());
         app.state.blend = preset.meta.blend.clamp(0.0, 1.0);
-        app.sim.lock().unwrap().set_blend(app.state.blend);
+        lock(&app.sim).set_blend(app.state.blend);
         app.apply_shaders_with_toml(&toml_params);
+        if let Some(b) = layer_b {
+            app.set_layer_b(Some(*b));
+        }
+        if restored_draft {
+            app.state.modified = true;
+            app.notify("Restored your unsaved work from the last visit. Save it, or load a preset to discard it.");
+        }
         if let Some(msg) = start_error {
             app.report(msg);
         }
@@ -180,29 +232,32 @@ impl App {
     }
 
     /// Switches to `preset` only if its shaders compile; otherwise reports the errors and leaves
-    /// the current editors, grid and params exactly as they were.
-    pub(crate) fn load_preset(&mut self, preset: Preset, source: PresetSource) {
+    /// the current editors, grid and params exactly as they were. Layer B follows the preset:
+    /// the one it carries, or none.
+    pub(crate) fn load_preset(&mut self, mut preset: Preset, source: PresetSource) {
+        let layer_b = preset.layer_b.take();
         let loaded = match prepare_preset_load(&preset) {
             Ok(l) => l,
             Err(mut errors) => {
                 for e in &mut errors {
                     e.message = format!("[{}] {}", preset.meta.name, e.message);
                 }
-                self.state.errors = diagnostics_from(errors);
+                self.state.errors = errors;
                 return;
             }
         };
-        let mut sim = self.sim.lock().unwrap();
+        let mut sim = lock(&self.sim);
         if let Err(errors) = sim.set_pipelines(&loaded.rule, &loaded.render, &loaded.post) {
             drop(sim);
-            self.state.errors = diagnostics_from(errors);
+            self.state.errors = errors;
             return;
         }
         sim.reconfigure(loaded.config.clone());
         let config = sim.config().clone();
         drop(sim);
         self.state.editor = loaded.editor;
-        self.state.pending = config;
+        self.state.pending = config.clone();
+        self.state.applied = config;
         self.state.steps_per_frame = loaded.steps_per_frame;
         self.state.preset_name = loaded.name;
         self.state.source = source;
@@ -211,12 +266,12 @@ impl App {
         self.state.modulations = loaded.modulations;
         self.state.midi_map = MidiMap::from_bindings(loaded.midi);
         self.state.blend = loaded.blend;
-        self.sim.lock().unwrap().set_blend(loaded.blend);
+        lock(&self.sim).set_blend(loaded.blend);
         self.state.errors.clear();
         self.state.modified = false;
-        self.state.started = web_time::Instant::now();
+        self.state.started = Instant::now();
         self.push_params();
-        self.sync_layer_b();
+        self.set_layer_b(layer_b.map(|b| *b));
     }
 
     /// Starts a new, unsaved preset from one of the embedded templates.
@@ -241,11 +296,11 @@ impl App {
 
     fn apply_shaders_with_toml(&mut self, toml_params: &BTreeMap<String, toml::Value>) {
         match build_shaders(&self.state.editor) {
-            Err(errors) => self.state.errors = diagnostics_from(errors),
+            Err(errors) => self.state.errors = errors,
             Ok((specs, rule, render, post)) => {
-                let result = self.sim.lock().unwrap().set_pipelines(&rule, &render, &post);
+                let result = lock(&self.sim).set_pipelines(&rule, &render, &post);
                 match result {
-                    Err(errors) => self.state.errors = diagnostics_from(errors),
+                    Err(errors) => self.state.errors = errors,
                     Ok(()) => {
                         self.state.values = resolve_values(&specs, toml_params, &self.state.values);
                         self.state.specs = specs;
@@ -258,24 +313,38 @@ impl App {
         }
     }
 
-    /// Uploads the current param values with any active modulations applied.
+    /// Browser only: the backend checks shaders asynchronously; a rejection arrives here.
+    fn poll_pipeline_checks(&mut self) {
+        if let Some(errors) = lock(&self.sim).poll_pipeline_check() {
+            self.state.errors = errors;
+        }
+        let Some(b) = &self.layer_b else { return };
+        let errors = lock(b).sim.poll_pipeline_check();
+        if let Some(mut errors) = errors {
+            for e in &mut errors {
+                e.message = format!("[layer B] {}", e.message);
+            }
+            self.state.errors = errors;
+        }
+    }
+
     pub(crate) fn set_blend(&mut self, blend: f32) {
         self.state.blend = blend.clamp(0.0, 1.0);
         self.state.modified = true;
-        self.sim.lock().unwrap().set_blend(self.state.blend);
+        lock(&self.sim).set_blend(self.state.blend);
     }
 
-    pub(crate) fn push_params(&self) {
-        let values = self.effective_values();
-        let packed = pack_params(&self.state.specs, &values);
-        self.sim.lock().unwrap().set_params(packed);
+    /// Uploads the current param values with any active modulations applied, and remembers the
+    /// modulated values for the live readout.
+    pub(crate) fn push_params(&mut self) {
+        self.live_values = if self.state.modulations.is_empty() { None } else { Some(self.effective_values()) };
+        let values = self.live_values.as_ref().unwrap_or(&self.state.values);
+        let packed = pack_params(&self.state.specs, values);
+        lock(&self.sim).set_params(packed);
     }
 
-    /// Slider values with the LFOs applied for this instant.
-    pub(crate) fn effective_values(&self) -> BTreeMap<String, ParamValue> {
-        if self.state.modulations.is_empty() {
-            return self.state.values.clone();
-        }
+    /// Slider values with the LFOs and audio sources applied for this instant.
+    fn effective_values(&self) -> BTreeMap<String, ParamValue> {
         let wall = self.launched.elapsed().as_secs_f32();
         let sim = self.state.started.elapsed().as_secs_f32();
         modulated_values_with_audio(
@@ -353,14 +422,20 @@ impl App {
         self.state.modulations.keys().any(|k| self.state.specs.iter().any(|s| &s.name == k))
     }
 
+    /// Reset: applies the pending grid settings to layer A, resizes layer B to match and
+    /// restarts both from their init patterns.
     pub(crate) fn apply_settings_and_reset(&mut self) {
-        let mut sim = self.sim.lock().unwrap();
+        let mut sim = lock(&self.sim);
         sim.reconfigure(self.state.pending.clone());
         self.state.pending = sim.config().clone(); // reflect clamping
+        self.state.applied = self.state.pending.clone();
         drop(sim);
-        self.state.started = web_time::Instant::now();
+        self.state.started = Instant::now();
         self.clear_stats();
         self.sync_layer_b();
+        if let Some(b) = &self.layer_b {
+            lock(b).sim.reset();
+        }
     }
 
     /// Save in place when the preset already has a home; otherwise behave like Save As.
@@ -421,9 +496,52 @@ impl App {
                 self.state.source = PresetSource::Saved(location.clone());
                 self.state.modified = false;
                 self.state.saved_presets = platform::list_saved();
+                self.discard_draft();
+                self.notify(format!("Saved to {}.", location.describe()));
             }
             Err(e) => self.report(format!("save failed: {e:#}")),
         }
+    }
+
+    /// Removes the current preset from where it is saved (after confirmation). The scene stays
+    /// open as an unsaved preset.
+    pub(crate) fn delete_saved_preset(&mut self) {
+        let PresetSource::Saved(location) = self.state.source.clone() else { return };
+        let question = format!("Delete {}? This cannot be undone.", location.describe());
+        if !platform::confirm("Delete preset?", &question) {
+            return;
+        }
+        match platform::delete_saved(&location) {
+            Ok(()) => {
+                self.state.source = PresetSource::Imported;
+                self.state.modified = true;
+                self.state.saved_presets = platform::list_saved();
+                self.notify(format!("Deleted {}. The scene is still open, unsaved.", location.describe()));
+            }
+            Err(e) => self.report(format!("delete failed: {e:#}")),
+        }
+    }
+
+    /// Browser only: every couple of seconds, while there are unsaved changes, writes the scene
+    /// to local storage so a closed tab does not lose it.
+    fn maybe_save_draft(&mut self) {
+        if !platform::is_web() || self.drafts.last_check.elapsed() < DRAFT_INTERVAL {
+            return;
+        }
+        self.drafts.last_check = Instant::now();
+        if !self.state.modified {
+            return;
+        }
+        let Ok(text) = to_bundle(&state_to_preset(&self.state)) else { return };
+        if self.drafts.last_text.as_deref() != Some(text.as_str()) {
+            platform::save_draft(&text);
+            self.drafts.last_text = Some(text);
+        }
+    }
+
+    fn discard_draft(&mut self) {
+        platform::clear_draft();
+        self.drafts.last_text = None;
     }
 
     /// Nudges every param; the previous values go on the undo stack.
@@ -450,7 +568,7 @@ impl App {
     /// Drains finished statistics, updates the history and the stuck detector, and reseeds when
     /// asked to.
     fn poll_stats(&mut self) {
-        let samples = self.sim.lock().unwrap().poll_stats();
+        let samples = lock(&self.sim).poll_stats();
         if samples.is_empty() {
             return;
         }
@@ -460,10 +578,10 @@ impl App {
         while self.state.stats.len() > 300 {
             self.state.stats.pop_front();
         }
-        let history: Vec<_> = self.state.stats.iter().copied().collect();
-        self.state.stuck = detect_stuck(&history, 48);
+        let stuck = detect_stuck(self.state.stats.make_contiguous(), 48);
+        self.state.stuck = stuck;
         match (self.state.stuck, self.state.stuck_since) {
-            (Some(_), None) => self.state.stuck_since = Some(web_time::Instant::now()),
+            (Some(_), None) => self.state.stuck_since = Some(Instant::now()),
             (None, _) => self.state.stuck_since = None,
             _ => {}
         }
@@ -494,7 +612,7 @@ impl App {
     /// Writes the remembered seed image into the grid (again).
     pub(crate) fn apply_seed_image(&mut self) {
         let Some(img) = &self.seed_image else { return };
-        let mut sim = self.sim.lock().unwrap();
+        let mut sim = lock(&self.sim);
         let (w, h) = {
             let c = sim.config();
             (c.width, c.height)
@@ -520,24 +638,33 @@ impl App {
         for file in &dropped {
             platform::queue_dropped_file(file.as_ref());
         }
-        for (name, bytes) in platform::poll_dropped_files() {
-            if let Some(err) = name.strip_prefix("__error__") {
-                self.report(format!("could not read dropped file {err}"));
-                continue;
-            }
-            let name = name.to_lowercase();
-            if name.ends_with(".png") {
+        for entry in platform::poll_dropped_files() {
+            let (name, bytes) = match entry {
+                Ok(f) => f,
+                Err(message) => {
+                    self.report(format!("could not read dropped file {message}"));
+                    continue;
+                }
+            };
+            let lower = name.to_lowercase();
+            if lower.ends_with(".png") {
                 self.seed_from_png(&bytes);
-            } else if name.ends_with(".toml") {
-                match std::str::from_utf8(&bytes)
-                    .map_err(anyhow::Error::from)
-                    .and_then(crate::preset::bundle::from_bundle)
-                {
+            } else if lower.ends_with(".toml") {
+                match std::str::from_utf8(&bytes).map_err(anyhow::Error::from).and_then(from_bundle) {
                     Ok(p) => {
                         self.load_preset(p, PresetSource::Imported);
                         self.state.modified = true;
                     }
-                    Err(e) => self.report(format!("dropped file is not a preset bundle: {e:#}")),
+                    Err(e) => {
+                        let looks_like_folder_meta = std::str::from_utf8(&bytes)
+                            .is_ok_and(|t| t.contains("steps_per_frame") && !t.contains("[meta]"));
+                        let hint = if looks_like_folder_meta {
+                            " It looks like a preset folder's preset.toml; drop a bundle exported with File > Export bundle instead."
+                        } else {
+                            ""
+                        };
+                        self.report(format!("dropped file is not a preset bundle: {e:#}.{hint}"));
+                    }
                 }
             } else {
                 self.report(format!("unsupported file type: {name} (PNG images and .toml bundles)"));
@@ -561,7 +688,7 @@ impl App {
 
     /// Starts a PNG export of the current state at `scale` pixels per cell.
     pub(crate) fn export_image(&mut self, scale: u32) {
-        let mut sim = self.sim.lock().unwrap();
+        let mut sim = lock(&self.sim);
         let filename = crate::sim::export::image_filename(&self.state.preset_name, sim.frame());
         let result = sim.start_export(scale, filename);
         drop(sim);
@@ -571,7 +698,7 @@ impl App {
     }
 
     fn poll_export_image(&mut self) {
-        let result = self.sim.lock().unwrap().poll_export();
+        let result = lock(&self.sim).poll_export();
         match result {
             None => {}
             Some(Err(e)) => {
@@ -583,11 +710,11 @@ impl App {
                     self.record_frame(img);
                 } else {
                     match img.to_png() {
-                        Ok(png) => {
-                            if let Err(e) = platform::save_png(&img.filename, &png) {
-                                self.report(format!("could not save image: {e:#}"));
-                            }
-                        }
+                        Ok(png) => match platform::save_png(&img.filename, &png) {
+                            Ok(Some(where_)) => self.notify(format!("Image saved: {where_}")),
+                            Ok(None) => {}
+                            Err(e) => self.report(format!("could not save image: {e:#}")),
+                        },
                         Err(e) => self.report(format!("could not encode image: {e:#}")),
                     }
                 }
@@ -596,64 +723,80 @@ impl App {
         self.capture_next_frame();
     }
 
-    /// Loads `preset` as layer B, sized like layer A, and wires both layers' `other()`.
+    /// Loads `preset` as layer B, sized like layer A, and wires both layers' `other()`. The
+    /// preset is remembered so Save and share links carry it.
     pub(crate) fn set_layer_b(&mut self, preset: Option<Preset>) {
         self.layer_b = None;
-        let mut a = self.sim.lock().unwrap();
-        let Some(preset) = preset else {
+        self.state.layer_b_preset = None;
+        let mut a = lock(&self.sim);
+        let Some(mut preset) = preset else {
             a.set_other(None);
             return;
         };
-        let (loaded, name) = match prepare_preset_load(&preset) {
-            Ok(l) => {
-                let name = l.name.clone();
-                (l, name)
-            }
-            Err(errors) => {
+        preset.layer_b = None; // one level of nesting only
+        let loaded = match prepare_preset_load(&preset) {
+            Ok(l) => l,
+            Err(mut errors) => {
                 drop(a);
-                self.state.errors = diagnostics_from(errors);
+                for e in &mut errors {
+                    e.message = format!("[layer B: {}] {}", preset.meta.name, e.message);
+                }
+                self.state.errors = errors;
                 return;
             }
         };
-        let config = SimConfigLike::from(a.config()).with_init(loaded.config.init.clone(), loaded.config.seed);
-        let rs = &self.render_state;
-        let mut b = Simulation::new(rs.device.clone(), rs.queue.clone(), rs.target_format, config);
+        let a_cfg = a.config();
+        let config = SimConfig {
+            mode: a_cfg.mode,
+            width: a_cfg.width,
+            height: a_cfg.height,
+            init: loaded.config.init.clone(),
+            seed: loaded.config.seed,
+        };
+        let mut b = Simulation::new(self.ctx.clone(), config);
         if let Err(errors) = b.set_pipelines(&loaded.rule, &loaded.render, &loaded.post) {
             drop(a);
-            self.state.errors = diagnostics_from(errors);
+            self.state.errors = errors;
             return;
         }
         let values = resolve_values(&loaded.specs, &loaded.toml_params, &BTreeMap::new());
         b.set_params(pack_params(&loaded.specs, &values));
-        b.set_snapshot_interval(u32::MAX);
+        b.disable_history();
         let mirror_a = a.create_mirror_texture();
         let mirror_b = b.create_mirror_texture();
         a.set_other(Some(&mirror_b));
         b.set_other(Some(&mirror_a));
         drop(a);
-        self.layer_b = Some(Arc::new(Mutex::new(LayerB { sim: b, name, mirror_a, mirror_b })));
+        self.layer_b = Some(Arc::new(Mutex::new(LayerB { sim: b, name: loaded.name, mirror_a, mirror_b })));
+        self.state.layer_b_preset = Some(preset);
     }
 
     /// After layer A changed size or mode, rebuild layer B to match.
     fn sync_layer_b(&mut self) {
         let Some(b) = &self.layer_b else { return };
-        let a_cfg = self.sim.lock().unwrap().config().clone();
-        let mut b_guard = b.lock().unwrap();
+        let a_cfg = lock(&self.sim).config().clone();
+        let mut b_guard = lock(b);
         let b_cfg = b_guard.sim.config().clone();
         if b_cfg.width == a_cfg.width && b_cfg.height == a_cfg.height && b_cfg.mode == a_cfg.mode {
             return;
         }
-        let new_cfg = crate::sim::SimConfig { mode: a_cfg.mode, width: a_cfg.width, height: a_cfg.height, init: b_cfg.init, seed: b_cfg.seed };
+        let new_cfg = SimConfig {
+            mode: a_cfg.mode,
+            width: a_cfg.width,
+            height: a_cfg.height,
+            init: b_cfg.init,
+            seed: b_cfg.seed,
+        };
         b_guard.sim.reconfigure(new_cfg);
-        b_guard.mirror_a = self.sim.lock().unwrap().create_mirror_texture();
+        b_guard.mirror_a = lock(&self.sim).create_mirror_texture();
         b_guard.mirror_b = b_guard.sim.create_mirror_texture();
-        self.sim.lock().unwrap().set_other(Some(&b_guard.mirror_b));
+        lock(&self.sim).set_other(Some(&b_guard.mirror_b));
         let mirror_a = b_guard.mirror_a.clone();
         b_guard.sim.set_other(Some(&mirror_a));
     }
 
     pub(crate) fn layer_b_name(&self) -> Option<String> {
-        self.layer_b.as_ref().map(|b| b.lock().unwrap().name.clone())
+        self.layer_b.as_ref().map(|b| lock(b).name.clone())
     }
 
     pub(crate) fn toggle_explorer(&mut self) {
@@ -661,7 +804,8 @@ impl App {
             self.explorer = None;
         } else {
             let seed = self.launched.elapsed().as_millis() as u64 ^ 0xC0FFEE;
-            self.explorer = Some(explorer_ui::Explorer::new(&self.render_state, seed));
+            self.explorer =
+                Some(explorer_ui::Explorer::new(self.ctx.clone(), self.render_state.renderer.clone(), seed));
         }
     }
 
@@ -669,7 +813,7 @@ impl App {
     pub(crate) fn open_record_dialog(&mut self) {
         let mut s = RecordingSettings::default();
         let (w, h) = {
-            let sim = self.sim.lock().unwrap();
+            let sim = lock(&self.sim);
             let c = sim.config();
             (c.width, c.height)
         };
@@ -708,7 +852,7 @@ impl App {
             return;
         }
         let scale = rec.settings.scale;
-        let mut sim = self.sim.lock().unwrap();
+        let mut sim = lock(&self.sim);
         if sim.export_pending() {
             return;
         }
@@ -745,8 +889,10 @@ impl App {
         match encode_apng(width, height, frames, fps) {
             Ok(bytes) => {
                 let name = recording_filename(&self.state.preset_name);
-                if let Err(e) = platform::save_png(&name, &bytes) {
-                    self.report(format!("could not save animation: {e:#}"));
+                match platform::save_png(&name, &bytes) {
+                    Ok(Some(where_)) => self.notify(format!("Animation saved ({} frames): {where_}", frames.len())),
+                    Ok(None) => {}
+                    Err(e) => self.report(format!("could not save animation: {e:#}")),
                 }
             }
             Err(e) => self.report(format!("could not encode animation: {e:#}")),
@@ -754,7 +900,7 @@ impl App {
     }
 
     pub(crate) fn export_pending(&self) -> bool {
-        self.sim.lock().unwrap().export_pending()
+        lock(&self.sim).export_pending()
     }
 
     /// Copies a link that reproduces the current scene to the clipboard.
@@ -765,7 +911,7 @@ impl App {
                 let url = crate::preset::share::share_url(&platform::share_base_url(), &code);
                 let len = url.len();
                 ctx.copy_text(url);
-                self.report(format!("Link copied to the clipboard ({len} characters)."));
+                self.notify(format!("Link copied to the clipboard ({len} characters)."));
             }
             Err(e) => self.report(format!("could not build a share link: {e:#}")),
         }
@@ -773,8 +919,10 @@ impl App {
 
     pub(crate) fn export(&mut self) {
         let preset = state_to_preset(&self.state);
-        if let Err(e) = platform::export_bundle(&preset) {
-            self.report(format!("export failed: {e:#}"));
+        match platform::export_bundle(&preset) {
+            Ok(Some(where_)) => self.notify(format!("Bundle exported: {where_}")),
+            Ok(None) => {}
+            Err(e) => self.report(format!("export failed: {e:#}")),
         }
     }
 
@@ -805,16 +953,10 @@ impl App {
             return;
         }
         let Some(pos) = response.interact_pointer_pos() else { return };
-        let (primary, secondary) = response
-            .ctx
-            .input(|i| (i.pointer.primary_down(), i.pointer.secondary_down()));
-        let value = if secondary && !primary {
-            [0.0, 0.0, 0.0, 1.0]
-        } else {
-            self.state.brush_value
-        };
+        let (primary, secondary) = response.ctx.input(|i| (i.pointer.primary_down(), i.pointer.secondary_down()));
+        let value = if secondary && !primary { [0.0, 0.0, 0.0, 1.0] } else { self.state.brush_value };
         let (w, h) = {
-            let sim = self.sim.lock().unwrap();
+            let sim = lock(&self.sim);
             let c = sim.config();
             (c.width, c.height)
         };
@@ -825,20 +967,37 @@ impl App {
         }
     }
 
-    /// Shows a non-shader message in the error panel.
-    pub(crate) fn report(&mut self, message: String) {
-        self.state.errors = vec![Diagnostic::General(message)];
+    /// Shows a failure in the bottom panel (stays until dismissed or replaced).
+    pub(crate) fn report(&mut self, message: impl Into<String>) {
+        self.notice = Some(Notice { text: message.into(), level: NoticeLevel::Error, at: Instant::now() });
+    }
+
+    /// Shows a confirmation in the bottom panel (fades out by itself).
+    pub(crate) fn notify(&mut self, message: impl Into<String>) {
+        self.notice = Some(Notice { text: message.into(), level: NoticeLevel::Info, at: Instant::now() });
+    }
+
+    fn expire_notice(&mut self) {
+        if self.notice.as_ref().is_some_and(|n| n.level == NoticeLevel::Info && n.at.elapsed() > NOTICE_TTL) {
+            self.notice = None;
+        }
+    }
+
+    /// True while a text editor has keyboard focus (so Space types rather than toggles play).
+    fn typing(ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.focused()).is_some_and(|id| egui::widgets::text_edit::TextEditState::load(ctx, id).is_some())
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let lost = self.sim.lock().unwrap().take_device_lost();
-        if let Some(message) = lost {
+        if let Some(message) = self.ctx.take_device_lost() {
             self.state.playing = false;
             self.report(format!("{message}. Restart the application to continue."));
         }
+        self.expire_notice();
+        self.poll_pipeline_checks();
         self.poll_import();
         self.poll_export_image();
         self.poll_stats();
@@ -849,6 +1008,7 @@ impl eframe::App for App {
         if self.modulation_active() {
             self.push_params();
         }
+        self.maybe_save_draft();
         ui_topbar::save_dialog(self, &ctx);
         // Global shortcut: Ctrl/Cmd+Enter applies shaders. Consume it before the editors see it.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
@@ -857,8 +1017,7 @@ impl eframe::App for App {
         if ctx.input_mut(|i| i.consume_shortcut(&ui_topbar::SAVE_SHORTCUT)) {
             self.save();
         }
-        let typing = ctx.memory(|m| m.focused().is_some());
-        if !typing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
+        if !Self::typing(&ctx) && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
             self.state.playing = !self.state.playing;
         }
 
@@ -876,7 +1035,12 @@ impl eframe::App for App {
             });
         });
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            let steps = if self.state.playing {
+            // While a recording waits for a frame to come back, the simulation holds still, so
+            // consecutive frames are always exactly `steps_per_frame` steps apart.
+            let waiting_for_capture = self.recording.is_some() && self.export_pending();
+            let steps = if waiting_for_capture {
+                0
+            } else if self.state.playing {
                 self.state.steps_per_frame
             } else if self.state.step_once {
                 1
@@ -906,6 +1070,7 @@ impl eframe::App for App {
             || self.recording.is_some()
             || self.audio.is_some()
             || self.midi.is_some()
+            || self.notice.as_ref().is_some_and(|n| n.level == NoticeLevel::Info)
         {
             ctx.request_repaint();
         }
@@ -914,21 +1079,28 @@ impl eframe::App for App {
     }
 }
 
-/// Layer B takes A's grid and mode but keeps its own init pattern and seed.
-struct SimConfigLike {
-    mode: crate::preset::Mode,
-    width: u32,
-    height: u32,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shader::validate::ShaderError;
 
-impl From<&crate::sim::SimConfig> for SimConfigLike {
-    fn from(c: &crate::sim::SimConfig) -> Self {
-        SimConfigLike { mode: c.mode, width: c.width, height: c.height }
+    #[test]
+    fn info_notices_expire_and_errors_stay() {
+        let old = Instant::now() - NOTICE_TTL - Duration::from_secs(1);
+        let info = Notice { text: "saved".into(), level: NoticeLevel::Info, at: old };
+        let error = Notice { text: "failed".into(), level: NoticeLevel::Error, at: old };
+        let expired = |n: &Notice| n.level == NoticeLevel::Info && n.at.elapsed() > NOTICE_TTL;
+        assert!(expired(&info));
+        assert!(!expired(&error));
     }
-}
 
-impl SimConfigLike {
-    fn with_init(self, init: crate::preset::InitPattern, seed: u32) -> crate::sim::SimConfig {
-        crate::sim::SimConfig { mode: self.mode, width: self.width, height: self.height, init, seed }
+    #[test]
+    fn shader_errors_keep_their_prefix_when_layer_b_fails() {
+        let mut errors =
+            vec![ShaderError { file: ShaderFile::Rule, line: 2, column: 1, message: "boom".into(), hint: None }];
+        for e in &mut errors {
+            e.message = format!("[layer B] {}", e.message);
+        }
+        assert_eq!(errors[0].message, "[layer B] boom");
     }
 }

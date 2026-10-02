@@ -5,14 +5,15 @@ use std::sync::Arc;
 use eframe::egui_wgpu;
 use eframe::wgpu;
 
-use super::explorer::{random_batch, LifelikeRule};
-use super::state::PresetSource;
 use super::App;
-use crate::preset::builtin::{load_builtin, BUILTINS};
+use super::explorer::{LifelikeRule, random_batch};
+use super::state::PresetSource;
+use crate::preset::builtin::{BUILTINS, load_builtin};
 use crate::preset::{InitPattern, Mode, Preset};
-use crate::shader::assemble::{assemble_post, assemble_render, assemble_rule, DEFAULT_POST};
+use crate::shader::assemble::{DEFAULT_POST, assemble_post, assemble_render, assemble_rule};
 use crate::shader::params::{pack_params, params_wgsl, parse_params};
-use crate::sim::{SimConfig, Simulation};
+use crate::shader::validate::{ShaderFile, validate};
+use crate::sim::{GpuContext, SimConfig, Simulation};
 
 const COLUMNS: usize = 4;
 const COUNT: usize = 16;
@@ -29,21 +30,12 @@ pub struct Explorer {
     thumbs: Vec<Thumb>,
     seed: u64,
     renderer: Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    target_format: wgpu::TextureFormat,
+    ctx: Arc<GpuContext>,
 }
 
 impl Explorer {
-    pub fn new(rs: &egui_wgpu::RenderState, seed: u64) -> Self {
-        let mut e = Explorer {
-            thumbs: Vec::new(),
-            seed,
-            renderer: rs.renderer.clone(),
-            device: rs.device.clone(),
-            queue: rs.queue.clone(),
-            target_format: rs.target_format,
-        };
+    pub fn new(ctx: Arc<GpuContext>, renderer: Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>, seed: u64) -> Self {
+        let mut e = Explorer { thumbs: Vec::new(), seed, renderer, ctx };
         e.shuffle(seed);
         e
     }
@@ -55,8 +47,12 @@ impl Explorer {
         let render_src = load_builtin(&BUILTINS[2]).render; // Life's age-coloured render
         let specs = parse_params(&render_src).unwrap_or_default();
         let pw = params_wgsl(&specs);
-        let render = assemble_render(&render_src, &pw);
-        let post = assemble_post(DEFAULT_POST, &pw);
+        let (Ok(render), Ok(post)) = (
+            validate(ShaderFile::Render, &assemble_render(&render_src, &pw)),
+            validate(ShaderFile::Post, &assemble_post(DEFAULT_POST, &pw)),
+        ) else {
+            return;
+        };
         self.thumbs = random_batch(seed, COUNT)
             .into_iter()
             .enumerate()
@@ -68,17 +64,15 @@ impl Explorer {
                     init: InitPattern::Random { density: 0.4 },
                     seed: seed as u32 ^ i as u32,
                 };
-                let mut sim = Simulation::new(self.device.clone(), self.queue.clone(), self.target_format, config);
-                let rule_a = assemble_rule(&rule.rule_wgsl(), &pw);
+                let mut sim = Simulation::new(self.ctx.clone(), config);
+                sim.disable_history(); // thumbnails never rewind
+                let rule_a = validate(ShaderFile::Rule, &assemble_rule(&rule.rule_wgsl(), &pw)).ok()?;
                 sim.set_pipelines(&rule_a, &render, &post).ok()?;
                 sim.set_params(pack_params(&specs, &Default::default()));
-                sim.set_snapshot_interval(u32::MAX); // no rewind history for thumbnails
                 sim.ensure_scene_size(THUMB_PX, THUMB_PX);
                 let view = sim.scene_view()?;
-                let texture = self
-                    .renderer
-                    .write()
-                    .register_native_texture(&self.device, view, wgpu::FilterMode::Nearest);
+                let texture =
+                    self.renderer.write().register_native_texture(&self.ctx.device, view, wgpu::FilterMode::Nearest);
                 Some(Thumb { rule, sim, texture })
             })
             .collect();
@@ -96,12 +90,14 @@ impl Explorer {
 
     /// Advances every thumbnail one step and re-renders it.
     pub fn tick(&mut self) {
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ca explorer") });
+        let mut enc =
+            self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ca explorer") });
         for t in &mut self.thumbs {
+            t.sim.poll_pipeline_check();
             t.sim.step(&mut enc, 1);
             t.sim.render_scene(&mut enc);
         }
-        self.queue.submit([enc.finish()]);
+        self.ctx.queue.submit([enc.finish()]);
     }
 
     /// Draws the grid; returns the rule the user clicked, if any.

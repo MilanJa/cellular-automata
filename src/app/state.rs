@@ -7,14 +7,10 @@ use crate::app::modulation::Modulation;
 use crate::midi::mapping::{CcKey, MidiMap};
 use crate::platform::SavedLocation;
 
-use crate::preset::{param_value_from_toml, param_value_to_toml, InitPattern, Preset, PresetMeta};
-use crate::shader::assemble::{
-    assemble_post, assemble_render, assemble_rule, assemble_rule_pair, Assembled, DEFAULT_POST,
-};
-use crate::shader::params::{
-    merge_params, params_wgsl, parse_params, ParamError, ParamSpec, ParamValue,
-};
-use crate::shader::validate::{validate, validate_pair, ShaderError, ShaderFile};
+use crate::preset::{InitPattern, Preset, PresetMeta, param_value_from_toml, param_value_to_toml};
+use crate::shader::assemble::{DEFAULT_POST, assemble_post, assemble_render, assemble_rule, assemble_rule_pair};
+use crate::shader::params::{ParamError, ParamSpec, ParamValue, merge_params, params_wgsl, parse_params};
+use crate::shader::validate::{ShaderError, ShaderFile, Validated, validate, validate_pair};
 use crate::sim::SimConfig;
 
 /// Upper bounds applied to values coming from the UI *and* from hand-edited preset files.
@@ -91,38 +87,9 @@ impl EditorState {
     }
 }
 
-/// One line in the error panel: either a located shader error or a general message.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Diagnostic {
-    Shader(ShaderError),
-    General(String),
-}
-
-impl Diagnostic {
-    pub fn text(&self) -> String {
-        match self {
-            Diagnostic::Shader(e) => {
-                format!("{}:{}:{}  {}", e.file.label(), e.line, e.column, e.message)
-            }
-            Diagnostic::General(m) => m.clone(),
-        }
-    }
-
-    /// Where a click should take the cursor, if anywhere.
-    pub fn location(&self) -> Option<(ShaderFile, usize)> {
-        match self {
-            Diagnostic::Shader(e) => Some((e.file, e.line)),
-            Diagnostic::General(_) => None,
-        }
-    }
-
-    pub fn shader_file(&self) -> Option<ShaderFile> {
-        self.location().map(|(f, _)| f)
-    }
-}
-
-pub fn diagnostics_from(errors: Vec<ShaderError>) -> Vec<Diagnostic> {
-    errors.into_iter().map(Diagnostic::Shader).collect()
+/// One line in the error panel: `file:line:col  message`.
+pub fn error_text(e: &ShaderError) -> String {
+    format!("{}:{}:{}  {}", e.file.label(), e.line, e.column, e.message)
 }
 
 pub struct AppState {
@@ -133,7 +100,8 @@ pub struct AppState {
     pub modulations: BTreeMap<String, Modulation>,
     /// MIDI knob bindings by param name, plus the pending "learn".
     pub midi_map: MidiMap,
-    pub errors: Vec<Diagnostic>,
+    /// Shader compile errors from the last apply (general notices live on `App::notice`).
+    pub errors: Vec<ShaderError>,
     /// True when anything savable changed since the preset was loaded or saved.
     pub modified: bool,
     pub playing: bool,
@@ -141,6 +109,10 @@ pub struct AppState {
     pub steps_per_frame: u32,
     /// Grid settings as edited in the UI; applied to the simulation on Reset.
     pub pending: SimConfig,
+    /// Grid settings the simulation actually runs with; what Save writes.
+    pub applied: SimConfig,
+    /// The preset loaded as layer B, so it is saved and shared with the scene.
+    pub layer_b_preset: Option<Preset>,
     pub preset_name: String,
     pub source: PresetSource,
     pub saved_presets: Vec<(String, SavedLocation)>,
@@ -184,7 +156,9 @@ impl AppState {
             playing: true,
             step_once: false,
             steps_per_frame: steps_per_frame.max(1),
+            applied: pending.clone(),
             pending,
+            layer_b_preset: None,
             preset_name,
             source,
             saved_presets: Vec::new(),
@@ -242,49 +216,43 @@ fn param_err(file: ShaderFile, e: ParamError) -> ShaderError {
 }
 
 /// Parses params from all three editors, merges them, assembles and validates the shaders.
-/// Returns every error found (rule, render, post order) or the specs plus the assembled sources.
+/// Returns every error found (rule, render, post order) or the specs plus the validated
+/// sources, ready for `Simulation::set_pipelines`.
 pub fn build_shaders(
     editor: &EditorState,
-) -> Result<(Vec<ParamSpec>, Assembled, Assembled, Assembled), Vec<ShaderError>> {
-    let rule_params =
-        parse_params(&editor.rule).map_err(|e| vec![param_err(ShaderFile::Rule, e)])?;
-    let rule_b_params =
-        parse_params(&editor.rule_b).map_err(|e| vec![param_err(ShaderFile::RuleB, e)])?;
-    let render_params =
-        parse_params(&editor.render).map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
-    let post_params =
-        parse_params(&editor.post).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
+) -> Result<(Vec<ParamSpec>, Validated, Validated, Validated), Vec<ShaderError>> {
+    let rule_params = parse_params(&editor.rule).map_err(|e| vec![param_err(ShaderFile::Rule, e)])?;
+    let rule_b_params = parse_params(&editor.rule_b).map_err(|e| vec![param_err(ShaderFile::RuleB, e)])?;
+    let render_params = parse_params(&editor.render).map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
+    let post_params = parse_params(&editor.post).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
     let specs = merge_params(rule_params, rule_b_params).map_err(|e| vec![param_err(ShaderFile::RuleB, e)])?;
-    let specs = merge_params(specs, render_params)
-        .map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
+    let specs = merge_params(specs, render_params).map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
     let specs = merge_params(specs, post_params).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
     let pw = params_wgsl(&specs);
     let pair = editor.has_rule_b();
-    let rule = if pair {
-        assemble_rule_pair(&editor.rule, &editor.rule_b, &pw)
-    } else {
-        assemble_rule(&editor.rule, &pw)
-    };
+    let rule =
+        if pair { assemble_rule_pair(&editor.rule, &editor.rule_b, &pw) } else { assemble_rule(&editor.rule, &pw) };
     let render = assemble_render(&editor.render, &pw);
     let post = assemble_post(&editor.post, &pw);
     let mut errors = Vec::new();
-    let rule_result = if pair { validate_pair(&rule) } else { validate(ShaderFile::Rule, &rule) };
-    if let Err(e) = rule_result {
-        errors.extend(e);
+    let mut check = |r: Result<Validated, Vec<ShaderError>>| match r {
+        Ok(v) => Some(v),
+        Err(e) => {
+            errors.extend(e);
+            None
+        }
+    };
+    let rule = check(if pair { validate_pair(&rule) } else { validate(ShaderFile::Rule, &rule) });
+    let render = check(validate(ShaderFile::Render, &render));
+    let post = check(validate(ShaderFile::Post, &post));
+    match (rule, render, post) {
+        (Some(rule), Some(render), Some(post)) if errors.is_empty() => Ok((specs, rule, render, post)),
+        _ => Err(errors),
     }
-    if let Err(e) = validate(ShaderFile::Render, &render) {
-        errors.extend(e);
-    }
-    if let Err(e) = validate(ShaderFile::Post, &post) {
-        errors.extend(e);
-    }
-    if errors.is_empty() { Ok((specs, rule, render, post)) } else { Err(errors) }
 }
 
 /// Splits a preset into editor text, grid config, steps-per-frame and its raw TOML param values.
-pub fn preset_to_state(
-    preset: &Preset,
-) -> (EditorState, SimConfig, u32, BTreeMap<String, toml::Value>) {
+pub fn preset_to_state(preset: &Preset) -> (EditorState, SimConfig, u32, BTreeMap<String, toml::Value>) {
     // Modulations travel separately through `LoadedPreset::modulations`.
     let m = &preset.meta;
     let editor = EditorState {
@@ -295,9 +263,9 @@ pub fn preset_to_state(
         ..Default::default()
     };
     let init = match &m.init {
-        InitPattern::Random { density } => InitPattern::Random {
-            density: if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.5 },
-        },
+        InitPattern::Random { density } => {
+            InitPattern::Random { density: if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.5 } }
+        }
         other => other.clone(),
     };
     let config = SimConfig {
@@ -317,9 +285,9 @@ pub struct LoadedPreset {
     pub config: SimConfig,
     pub steps_per_frame: u32,
     pub specs: Vec<ParamSpec>,
-    pub rule: Assembled,
-    pub render: Assembled,
-    pub post: Assembled,
+    pub rule: Validated,
+    pub render: Validated,
+    pub post: Validated,
     pub toml_params: BTreeMap<String, toml::Value>,
     pub modulations: BTreeMap<String, Modulation>,
     pub midi: BTreeMap<String, CcKey>,
@@ -348,13 +316,15 @@ pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderEr
     })
 }
 
+/// The preset to save or share: the applied grid settings (not unapplied edits), the current
+/// param values, modulations and MIDI bindings for declared params, and layer B if loaded.
 pub fn state_to_preset(state: &AppState) -> Preset {
     let params = state
         .specs
         .iter()
         .filter_map(|s| state.values.get(&s.name).map(|v| (s.name.clone(), param_value_to_toml(v))))
         .collect();
-    let c = &state.pending;
+    let c = &state.applied;
     Preset {
         meta: PresetMeta {
             name: state.preset_name.clone(),
@@ -384,6 +354,7 @@ pub fn state_to_preset(state: &AppState) -> Preset {
         render: state.editor.render.clone(),
         post: state.editor.post_for_preset(),
         rule_b: state.editor.rule_b_for_preset(),
+        layer_b: state.layer_b_preset.clone().map(Box::new),
     }
 }
 
@@ -409,12 +380,12 @@ pub fn resolve_values(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preset::builtin::{load_builtin, BUILTINS};
-    use crate::shader::params::{parse_params, ParamValue};
+    use crate::preset::builtin::{BUILTINS, load_builtin};
+    use crate::shader::params::{ParamValue, parse_params};
 
     #[test]
     fn build_shaders_for_every_builtin_succeeds() {
-        for b in BUILTINS {
+        for b in BUILTINS.iter() {
             let p = load_builtin(b);
             let (editor, _, _, _) = preset_to_state(&p);
             build_shaders(&editor).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
@@ -447,10 +418,9 @@ mod tests {
 
     #[test]
     fn resolve_values_prefers_toml_then_previous_then_default() {
-        let specs = parse_params(
-            "// @param a: f32 = 1\n// @param b: f32 = 2\n// @param c: f32 = 3\n// @param d: i32 = 4\n",
-        )
-        .unwrap();
+        let specs =
+            parse_params("// @param a: f32 = 1\n// @param b: f32 = 2\n// @param c: f32 = 3\n// @param d: i32 = 4\n")
+                .unwrap();
         let mut toml_params = BTreeMap::new();
         toml_params.insert("a".to_string(), toml::Value::Float(10.0));
         toml_params.insert("d".to_string(), toml::Value::Float(1.5)); // wrong type for i32
@@ -472,15 +442,8 @@ mod tests {
         let (editor, config, spf, toml_params) = preset_to_state(&p);
         let (specs, _, _, _) = build_shaders(&editor).unwrap();
         let values = resolve_values(&specs, &toml_params, &BTreeMap::new());
-        let state = AppState::from_parts(
-            editor,
-            config,
-            spf,
-            specs,
-            values,
-            p.meta.name.clone(),
-            PresetSource::Builtin(2),
-        );
+        let state =
+            AppState::from_parts(editor, config, spf, specs, values, p.meta.name.clone(), PresetSource::Builtin(2));
         let back = state_to_preset(&state);
         assert_eq!(back.rule, p.rule);
         assert_eq!(back.render, p.render);
@@ -488,6 +451,30 @@ mod tests {
         assert_eq!(back.meta.mode, p.meta.mode);
         assert_eq!(back.meta.name, p.meta.name);
         assert!(back.meta.params.contains_key("fade"));
+        assert_eq!(back.layer_b, None);
+    }
+
+    #[test]
+    fn save_uses_the_applied_grid_and_carries_layer_b() {
+        let p = load_builtin(&BUILTINS[2]);
+        let (editor, config, spf, _) = preset_to_state(&p);
+        let mut state = AppState::from_parts(
+            editor,
+            config.clone(),
+            spf,
+            Vec::new(),
+            BTreeMap::new(),
+            p.meta.name.clone(),
+            PresetSource::Builtin(2),
+        );
+        // Edits to the grid that were not applied with Reset do not leak into the saved file.
+        state.pending.width = config.width * 2;
+        let mut layer = load_builtin(&BUILTINS[4]);
+        layer.layer_b = Some(Box::new(load_builtin(&BUILTINS[0]))); // nesting is stripped on load
+        state.layer_b_preset = Some(layer.clone());
+        let back = state_to_preset(&state);
+        assert_eq!(back.meta.width, config.width);
+        assert_eq!(back.layer_b.as_deref().map(|b| b.meta.name.as_str()), Some(layer.meta.name.as_str()));
     }
 
     #[test]
@@ -543,16 +530,9 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_text_and_location() {
-        let d = Diagnostic::Shader(ShaderError { file: ShaderFile::Render, line: 3, column: 7, message: "boom".into(), hint: None });
-        assert_eq!(d.text(), "render.wgsl:3:7  boom");
-        assert_eq!(d.location(), Some((ShaderFile::Render, 3)));
-        let g = Diagnostic::General("save failed".into());
-        assert_eq!(g.text(), "save failed");
-        assert_eq!(g.location(), None);
-        let list = diagnostics_from(vec![ShaderError { file: ShaderFile::Rule, line: 1, column: 1, message: "x".into(), hint: None }]);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].location(), Some((ShaderFile::Rule, 1)));
+    fn error_text_names_file_line_and_column() {
+        let e = ShaderError { file: ShaderFile::Render, line: 3, column: 7, message: "boom".into(), hint: None };
+        assert_eq!(error_text(&e), "render.wgsl:3:7  boom");
     }
 
     #[test]
@@ -591,7 +571,7 @@ mod tests {
         let (specs, _, _, post) = build_shaders(&editor).unwrap();
         assert!(specs.iter().any(|s| s.name == "strength"));
         assert!(specs.iter().any(|s| s.name == "fade"));
-        assert!(post.source.contains("params.strength"));
+        assert!(post.source().contains("params.strength"));
         editor.post = "fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> { return 1.0; }\n".into();
         let errs = build_shaders(&editor).unwrap_err();
         assert!(errs.iter().any(|e| e.file == ShaderFile::Post));
@@ -612,10 +592,10 @@ mod tests {
         let mut editor = preset_to_state(&load_builtin(&BUILTINS[2])).0;
         assert!(editor.rule_b.is_empty());
         let (_, rule, _, _) = build_shaders(&editor).unwrap();
-        assert!(!rule.source.contains("fn rule_b("));
+        assert!(!rule.source().contains("fn rule_b("));
         editor.rule_b = "fn rule(pos: vec2<u32>) -> vec4<f32> { return on_if(!alive(i32(pos.x), i32(pos.y)) && neighbours(i32(pos.x), i32(pos.y)) == 2u); }\n".into();
         let (_, rule, _, _) = build_shaders(&editor).unwrap();
-        assert!(rule.source.contains("fn rule_b("));
+        assert!(rule.source().contains("fn rule_b("));
         editor.rule_b = "fn rule(pos: vec2<u32>) -> vec4<f32> { return 1.0; }\n".into();
         let errs = build_shaders(&editor).unwrap_err();
         assert!(errs.iter().any(|e| e.file == ShaderFile::RuleB));

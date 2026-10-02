@@ -10,12 +10,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       # cpal and midir link against ALSA on Linux.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - run: cargo fmt --all -- --check
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets -- -D warnings
+
+  # The GPU tests need an adapter. Mesa's lavapipe is a software Vulkan driver, so they can run
+  # headless. Driver quirks must not block a merge, hence continue-on-error; the log is still
+  # the place to look when the simulation changes.
+  gpu-tests:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev mesa-vulkan-drivers vulkan-tools
+      - run: vulkaninfo --summary || true
+      - run: cargo test gpu_tests -- --ignored --nocapture
+        env:
+          WGPU_BACKEND: vulkan
 
   web:
     runs-on: ubuntu-latest
@@ -24,11 +43,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
       - uses: jetli/trunk-action@v0.5.0
         with:
-          version: latest
+          # Pinned so a new Trunk release cannot change the build under us; bump deliberately.
+          version: 'v0.21.14'
       - run: trunk build --release --cargo-profile web --public-url /${{ github.event.repository.name }}/
       - uses: actions/upload-pages-artifact@v3
         with:

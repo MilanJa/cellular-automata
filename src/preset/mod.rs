@@ -61,21 +61,34 @@ pub struct Preset {
     pub post: Option<String>,
     /// Optional second rule (`rule_b.wgsl`) crossfaded with the first by `meta.blend`.
     pub rule_b: Option<String>,
+    /// Optional second automaton that runs alongside (a `layer_b/` sub-preset); the shaders read
+    /// it through `other(x, y)`. A layer B's own `layer_b` is ignored.
+    pub layer_b: Option<Box<Preset>>,
 }
+
+/// Folder name of the nested layer B preset.
+pub const LAYER_B_DIR: &str = "layer_b";
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Preset {
     pub fn load_dir(dir: &Path) -> anyhow::Result<Preset> {
         let meta_path = dir.join("preset.toml");
-        let meta_text = std::fs::read_to_string(&meta_path)
-            .with_context(|| format!("reading {}", meta_path.display()))?;
+        let meta_text =
+            std::fs::read_to_string(&meta_path).with_context(|| format!("reading {}", meta_path.display()))?;
         let meta: PresetMeta = toml::from_str(&meta_text).context("parsing preset.toml")?;
         let rule = std::fs::read_to_string(dir.join("rule.wgsl")).context("reading rule.wgsl")?;
-        let render =
-            std::fs::read_to_string(dir.join("render.wgsl")).context("reading render.wgsl")?;
+        let render = std::fs::read_to_string(dir.join("render.wgsl")).context("reading render.wgsl")?;
         let post = std::fs::read_to_string(dir.join("post.wgsl")).ok();
         let rule_b = std::fs::read_to_string(dir.join("rule_b.wgsl")).ok();
-        Ok(Preset { meta, rule, render, post, rule_b })
+        let layer_dir = dir.join(LAYER_B_DIR);
+        let layer_b = if preset_exists(&layer_dir) {
+            let mut b = Preset::load_dir(&layer_dir).context("reading layer_b/")?;
+            b.layer_b = None;
+            Some(Box::new(b))
+        } else {
+            None
+        };
+        Ok(Preset { meta, rule, render, post, rule_b, layer_b })
     }
 
     pub fn save_dir(&self, dir: &Path) -> anyhow::Result<()> {
@@ -96,7 +109,23 @@ impl Preset {
                 let _ = std::fs::remove_file(dir.join("rule_b.wgsl"));
             }
         }
+        let layer_dir = dir.join(LAYER_B_DIR);
+        match &self.layer_b {
+            Some(b) => b.save_dir(&layer_dir).context("writing layer_b/")?,
+            None => {
+                if preset_exists(&layer_dir) {
+                    std::fs::remove_dir_all(&layer_dir).context("removing layer_b/")?;
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Deletes a preset folder. Refuses anything that does not hold a `preset.toml`, so a wrong
+    /// path can never remove an unrelated directory.
+    pub fn delete_dir(dir: &Path) -> anyhow::Result<()> {
+        anyhow::ensure!(preset_exists(dir), "{} is not a preset folder", dir.display());
+        std::fs::remove_dir_all(dir).with_context(|| format!("deleting {}", dir.display()))
     }
 }
 
@@ -134,9 +163,7 @@ fn f32_to_toml_float(x: f32) -> f64 {
 }
 
 pub fn param_value_to_toml(v: &ParamValue) -> toml::Value {
-    let arr = |a: &[f32]| {
-        toml::Value::Array(a.iter().map(|x| toml::Value::Float(f32_to_toml_float(*x))).collect())
-    };
+    let arr = |a: &[f32]| toml::Value::Array(a.iter().map(|x| toml::Value::Float(f32_to_toml_float(*x))).collect());
     match v {
         ParamValue::F32(x) => toml::Value::Float(f32_to_toml_float(*x)),
         ParamValue::I32(x) => toml::Value::Integer(*x as i64),
@@ -201,11 +228,7 @@ mod tests {
         params.insert("threshold".into(), toml::Value::Float(0.5));
         params.insert(
             "col".into(),
-            toml::Value::Array(vec![
-                toml::Value::Float(1.0),
-                toml::Value::Float(0.5),
-                toml::Value::Float(0.2),
-            ]),
+            toml::Value::Array(vec![toml::Value::Float(1.0), toml::Value::Float(0.5), toml::Value::Float(0.2)]),
         );
         Preset {
             meta: PresetMeta {
@@ -225,6 +248,7 @@ mod tests {
             render: "fn shade() {}\n".into(),
             post: None,
             rule_b: None,
+            layer_b: None,
         }
     }
 
@@ -274,37 +298,18 @@ mod tests {
 
     #[test]
     fn param_value_conversions() {
-        assert_eq!(
-            param_value_from_toml(ParamType::F32, &toml::Value::Float(0.5)),
-            Some(ParamValue::F32(0.5))
-        );
-        assert_eq!(
-            param_value_from_toml(ParamType::F32, &toml::Value::Integer(2)),
-            Some(ParamValue::F32(2.0))
-        );
-        assert_eq!(
-            param_value_from_toml(ParamType::I32, &toml::Value::Integer(3)),
-            Some(ParamValue::I32(3))
-        );
-        assert_eq!(
-            param_value_from_toml(ParamType::Bool, &toml::Value::Boolean(true)),
-            Some(ParamValue::Bool(true))
-        );
+        assert_eq!(param_value_from_toml(ParamType::F32, &toml::Value::Float(0.5)), Some(ParamValue::F32(0.5)));
+        assert_eq!(param_value_from_toml(ParamType::F32, &toml::Value::Integer(2)), Some(ParamValue::F32(2.0)));
+        assert_eq!(param_value_from_toml(ParamType::I32, &toml::Value::Integer(3)), Some(ParamValue::I32(3)));
+        assert_eq!(param_value_from_toml(ParamType::Bool, &toml::Value::Boolean(true)), Some(ParamValue::Bool(true)));
         assert_eq!(
             param_value_from_toml(
                 ParamType::Vec3,
-                &toml::Value::Array(vec![
-                    toml::Value::Float(1.0),
-                    toml::Value::Integer(0),
-                    toml::Value::Float(0.5)
-                ])
+                &toml::Value::Array(vec![toml::Value::Float(1.0), toml::Value::Integer(0), toml::Value::Float(0.5)])
             ),
             Some(ParamValue::Vec3([1.0, 0.0, 0.5]))
         );
-        assert_eq!(
-            param_value_from_toml(ParamType::Vec3, &toml::Value::Array(vec![toml::Value::Float(1.0)])),
-            None
-        );
+        assert_eq!(param_value_from_toml(ParamType::Vec3, &toml::Value::Array(vec![toml::Value::Float(1.0)])), None);
         assert_eq!(param_value_from_toml(ParamType::I32, &toml::Value::String("x".into())), None);
         let back = param_value_to_toml(&ParamValue::Vec2([1.0, 2.0]));
         assert_eq!(param_value_from_toml(ParamType::Vec2, &back), Some(ParamValue::Vec2([1.0, 2.0])));
@@ -362,8 +367,15 @@ mod tests {
         let v = param_value_to_toml(&ParamValue::F32(0.1));
         assert_eq!(v, toml::Value::Float(0.1));
         let v = param_value_to_toml(&ParamValue::Vec3([0.3, 1.0, 0.037]));
-        assert_eq!(v, toml::Value::Array(vec![toml::Value::Float(0.3), toml::Value::Float(1.0), toml::Value::Float(0.037)]));
-        let text = toml::to_string(&toml::Table::from_iter([("fade".to_string(), param_value_to_toml(&ParamValue::F32(40.0)))])).unwrap();
+        assert_eq!(
+            v,
+            toml::Value::Array(vec![toml::Value::Float(0.3), toml::Value::Float(1.0), toml::Value::Float(0.037)])
+        );
+        let text = toml::to_string(&toml::Table::from_iter([(
+            "fade".to_string(),
+            param_value_to_toml(&ParamValue::F32(40.0)),
+        )]))
+        .unwrap();
         assert_eq!(text.trim(), "fade = 40.0");
     }
 
@@ -407,6 +419,29 @@ mod tests {
         p.save_dir(dir.path()).unwrap();
         assert!(dir.path().join("post.wgsl").exists());
         assert_eq!(Preset::load_dir(dir.path()).unwrap(), p);
+    }
+
+    #[test]
+    fn layer_b_is_saved_as_a_sub_preset_and_deleted_with_care() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = sample();
+        let mut b = sample();
+        b.meta.name = "Inner".into();
+        p.layer_b = Some(Box::new(b));
+        p.save_dir(dir.path()).unwrap();
+        assert!(dir.path().join(LAYER_B_DIR).join("preset.toml").exists());
+        assert_eq!(Preset::load_dir(dir.path()).unwrap(), p);
+        // Saving without a layer B removes the sub-preset again.
+        p.layer_b = None;
+        p.save_dir(dir.path()).unwrap();
+        assert!(!dir.path().join(LAYER_B_DIR).exists());
+        assert_eq!(Preset::load_dir(dir.path()).unwrap(), p);
+        // A nested preset only ever nests one level deep.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir(other.path().join("not_a_preset")).unwrap();
+        assert!(Preset::delete_dir(&other.path().join("not_a_preset")).is_err(), "refuses non-presets");
+        Preset::delete_dir(dir.path()).unwrap();
+        assert!(!dir.path().join("preset.toml").exists());
     }
 
     #[test]

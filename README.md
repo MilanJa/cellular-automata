@@ -79,6 +79,10 @@ Both layers' rule and render shaders can read the other layer's previous state w
 gate, seed or colour another. The *Driven by layer B* template is Life that can only grow where
 layer B's `.g` channel is high; load Gray-Scott as layer B to see it.
 
+Layer B is part of the scene: **Save** writes it as a `layer_b/` sub-folder of the preset (a
+`[layer_b]` table in bundles and share links), loading a preset brings its layer B back or clears
+the current one, and **Reset** restarts both layers together.
+
 ## Crossfading two rules
 
 **Rule B** is an optional second rule with the same `fn rule(...)` signature. When it is present,
@@ -108,8 +112,8 @@ Declare live sliders in either shader with a comment:
     // @param on: bool = true            // in WGSL: params.on != 0u
     // @param tint: vec3<f32> = (1, 0.5, 0.2) color
 
-They appear under **Params** and are read as `params.<name>`. Up to 16 params; values
-survive re-applies as long as the name and type stay the same.
+They appear under **Params** and are read as `params.<name>`. Up to 32 params across all
+editors; values survive re-applies as long as the name and type stay the same.
 
 ## 1D automata
 
@@ -125,7 +129,10 @@ generations back. `prev_cell` always reads the right row.
 
 A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`. Folders under
 `./presets` appear in the dropdown (**File → Rescan presets** after adding one). **File → Save** (Ctrl+S) writes back to
-a preset's folder; **Save as…** picks a new folder. Built-ins: Rule 30, Rule 110, Game of
+a preset's folder; **Save as…** picks a new folder; **Delete saved preset…** removes the folder
+(or the browser entry) after a confirmation and keeps the scene open, unsaved. Save writes the
+grid settings that are actually applied, so edits in the Grid section only reach the file after
+**Reset**. Built-ins: Rule 30, Rule 110, Game of
 Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule is plain Life but
 whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
 how much the render side alone can do.
@@ -155,9 +162,9 @@ Rules with no births or with B0 are skipped.
 
 **Image → Record animation…** captures a number of frames while the simulation plays and saves
 them as a looping animated PNG (APNG, which browsers and most viewers play). Choose pixels per
-cell, frame count and playback rate; frames are captured as fast as the GPU returns them and are
-buffered within a 256 MB budget. **Stop** in the status bar ends a recording early and keeps what
-was captured.
+cell, frame count and playback rate. The simulation holds still while a frame is being read back,
+so consecutive frames are always exactly *steps/frame* steps apart; frames are buffered within a
+256 MB budget. **Stop** in the status bar ends a recording early and keeps what was captured.
 
 ## Rewind
 
@@ -220,7 +227,9 @@ Add `?preset=rule30` to the URL to start on a built-in.
 Differences from the desktop build: presets are saved in the browser's local storage
 (the "Browser storage" section of the dropdown) instead of folders, and **File → Export bundle…** / **Import bundle…**
 move a single `*.capreset.toml` bundle in and out. Export and Import exist on the desktop too, so
-a preset can travel between the two.
+a preset can travel between the two. Unsaved work is also kept as a draft in local storage: open
+the page again without a `?preset` or share link and it comes back, until you save it or load
+another preset.
 
 Build it yourself:
 
@@ -237,3 +246,6 @@ the smaller bundle (faster download and compile) is worth more than CPU micro-op
     cargo test                                        # no GPU needed
     cargo test gpu_tests -- --ignored                 # headless GPU tests (need an adapter)
     cargo clippy --target wasm32-unknown-unknown      # the web build must stay warning-free
+    cargo fmt --all -- --check                        # CI enforces rustfmt (see rustfmt.toml)
+
+CI runs the GPU tests too, on Mesa's software Vulkan driver, as an advisory job.

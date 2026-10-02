@@ -75,7 +75,7 @@ pub fn mutate_values(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shader::params::{parse_params, ParamValue};
+    use crate::shader::params::{ParamValue, parse_params};
     use std::collections::BTreeMap;
 
     fn setup() -> (Vec<crate::shader::params::ParamSpec>, BTreeMap<String, ParamValue>) {
@@ -127,9 +127,8 @@ mod tests {
     #[test]
     fn bools_flip_sometimes_but_not_always() {
         let (specs, values) = setup();
-        let flips = (0..100u64)
-            .filter(|&s| mutate_values(&specs, &values, s)["enabled"] == ParamValue::Bool(false))
-            .count();
+        let flips =
+            (0..100u64).filter(|&s| mutate_values(&specs, &values, s)["enabled"] == ParamValue::Bool(false)).count();
         assert!((5..95).contains(&flips), "flips = {flips}");
     }
 }

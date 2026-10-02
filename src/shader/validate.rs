@@ -22,9 +22,27 @@ impl ShaderFile {
     }
 }
 
+/// WGSL that naga has parsed and validated. `Simulation::set_pipelines` only accepts these,
+/// so validation runs exactly once per apply and the GPU never sees unchecked source.
+#[derive(Debug, Clone)]
+pub struct Validated {
+    file: ShaderFile,
+    source: String,
+}
+
+impl Validated {
+    pub fn file(&self) -> ShaderFile {
+        self.file
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
 /// Validates a rule pair (see `assemble_rule_pair`) and attributes each error to rule A or B
 /// with a line number relative to that rule's own text.
-pub fn validate_pair(assembled: &Assembled) -> Result<naga::Module, Vec<ShaderError>> {
+pub fn validate_pair(assembled: &Assembled) -> Result<Validated, Vec<ShaderError>> {
     let a_lines = assembled
         .rule_b_line_offset
         .map(|b| b.saturating_sub(assembled.user_line_offset))
@@ -74,11 +92,8 @@ fn map_location(
         }
         None => (1, 1, false),
     };
-    let line_text = if in_prelude {
-        ""
-    } else {
-        assembled.source.lines().nth(assembled.user_line_offset + line - 1).unwrap_or("")
-    };
+    let line_text =
+        if in_prelude { "" } else { assembled.source.lines().nth(assembled.user_line_offset + line - 1).unwrap_or("") };
     let hint = hint_for(&message, line_text);
     let message = if in_prelude { format!("{message} (in generated prelude)") } else { message };
     ShaderError { file, line, column, message, hint }
@@ -113,37 +128,27 @@ fn error_chain(e: &dyn std::error::Error) -> String {
     parts.join(": ")
 }
 
-pub fn validate(file: ShaderFile, assembled: &Assembled) -> Result<naga::Module, Vec<ShaderError>> {
+pub fn validate(file: ShaderFile, assembled: &Assembled) -> Result<Validated, Vec<ShaderError>> {
     let module = match naga::front::wgsl::parse_str(&assembled.source) {
         Ok(m) => m,
         Err(e) => {
-            let loc = pick_location(
-                assembled,
-                e.labels().map(|(span, _)| span.location(&assembled.source)),
-                false,
-            )
-            .or_else(|| e.location(&assembled.source));
+            let loc = pick_location(assembled, e.labels().map(|(span, _)| span.location(&assembled.source)), false)
+                .or_else(|| e.location(&assembled.source));
             return Err(vec![map_location(file, assembled, loc, e.message().to_string())]);
         }
     };
     // The device is created with default features, so only the baseline capability set is
     // allowed; anything beyond it (f64, f16, subgroups, ...) is reported here instead of
     // reaching the GPU backend.
-    let mut validator = naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
-    );
+    let mut validator =
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty());
     match validator.validate(&module) {
-        Ok(_) => Ok(module),
+        Ok(_) => Ok(Validated { file, source: assembled.source.clone() }),
         Err(e) => {
             // The innermost span is the most specific (the offending expression), while the
             // outermost usually just points at the enclosing function.
-            let loc = pick_location(
-                assembled,
-                e.spans().map(|(span, _)| span.location(&assembled.source)),
-                true,
-            )
-            .or_else(|| e.location(&assembled.source));
+            let loc = pick_location(assembled, e.spans().map(|(span, _)| span.location(&assembled.source)), true)
+                .or_else(|| e.location(&assembled.source));
             let message = error_chain(e.as_inner());
             Err(vec![map_location(file, assembled, loc, message)])
         }
@@ -156,8 +161,7 @@ mod tests {
     use crate::shader::assemble::{assemble_render, assemble_rule};
     use crate::shader::params::params_wgsl;
 
-    const OK_RULE: &str =
-        "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    return cell(i32(pos.x), i32(pos.y));\n}\n";
+    const OK_RULE: &str = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    return cell(i32(pos.x), i32(pos.y));\n}\n";
     const OK_RENDER: &str =
         "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> {\n    return vec4<f32>(cell.rgb, 1.0);\n}\n";
 
@@ -200,7 +204,8 @@ mod tests {
     #[test]
     fn features_the_device_lacks_are_rejected_by_validation() {
         // f64 needs the FLOAT64 capability, which the default device does not have.
-        let user = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let d: f64 = 1.0lf;\n    return vec4<f32>(f32(d));\n}\n";
+        let user =
+            "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let d: f64 = 1.0lf;\n    return vec4<f32>(f32(d));\n}\n";
         let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
         assert_eq!(errs[0].line, 2, "{:?}", errs[0]);
     }
@@ -215,7 +220,8 @@ mod tests {
 
     #[test]
     fn hints_are_attached_to_errors() {
-        let user = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let x: f32 = pos.x * 2.0;\n    return vec4<f32>(x);\n}\n";
+        let user =
+            "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let x: f32 = pos.x * 2.0;\n    return vec4<f32>(x);\n}\n";
         let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
         let hint = errs[0].hint.as_deref().expect("hint for numeric type mix");
         assert!(hint.contains("f32("), "{hint}");
@@ -223,7 +229,7 @@ mod tests {
 
     #[test]
     fn post_shader_validates_and_reports_its_own_file() {
-        use crate::shader::assemble::{assemble_post, DEFAULT_POST};
+        use crate::shader::assemble::{DEFAULT_POST, assemble_post};
         assert!(validate(ShaderFile::Post, &assemble_post(DEFAULT_POST, &params_wgsl(&[]))).is_ok());
         let bloom = "fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {\n    let px = 1.0 / vec2<f32>(globals.size);\n    var acc = vec4<f32>(0.0);\n    for (var i = -2; i <= 2; i++) { acc += scene(uv + vec2<f32>(f32(i), 0.0) * px * 2.0); }\n    return color + acc * 0.1 + prev(uv) * 0.3;\n}\n";
         assert!(validate(ShaderFile::Post, &assemble_post(bloom, &params_wgsl(&[]))).is_ok());

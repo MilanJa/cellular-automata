@@ -59,16 +59,14 @@ mod tests {
     #[test]
     fn single_2d_sets_centre_only() {
         let v = generate_init(&InitPattern::Single, Mode::TwoD, 8, 6, 0);
-        let on: Vec<usize> =
-            v.chunks(4).enumerate().filter(|(_, p)| p[0] > 0.5).map(|(i, _)| i).collect();
+        let on: Vec<usize> = v.chunks(4).enumerate().filter(|(_, p)| p[0] > 0.5).map(|(i, _)| i).collect();
         assert_eq!(on, vec![3 * 8 + 4]);
     }
 
     #[test]
     fn single_1d_sets_centre_of_row_zero() {
         let v = generate_init(&InitPattern::Single, Mode::OneD, 8, 6, 0);
-        let on: Vec<usize> =
-            v.chunks(4).enumerate().filter(|(_, p)| p[0] > 0.5).map(|(i, _)| i).collect();
+        let on: Vec<usize> = v.chunks(4).enumerate().filter(|(_, p)| p[0] > 0.5).map(|(i, _)| i).collect();
         assert_eq!(on, vec![4]);
     }
 

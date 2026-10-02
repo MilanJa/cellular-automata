@@ -41,9 +41,7 @@ impl AudioInput {
             )?,
             cpal::SampleFormat::U16 => device.build_input_stream(
                 config.into(),
-                move |data: &[u16], _| {
-                    push_mono(&sink, data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0), channels)
-                },
+                move |data: &[u16], _| push_mono(&sink, data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0), channels),
                 err_fn,
                 None,
             )?,

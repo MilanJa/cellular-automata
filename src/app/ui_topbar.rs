@@ -1,12 +1,12 @@
+use super::App;
 use super::state::PresetSource;
 use super::theme;
-use super::App;
 use crate::platform;
-use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
 use crate::preset::Preset;
+use crate::preset::builtin::{BUILTINS, TEMPLATES, load_builtin};
+use crate::util::lock;
 
-pub const SAVE_SHORTCUT: egui::KeyboardShortcut =
-    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+pub const SAVE_SHORTCUT: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
 
 /// Menu bar: File / Image / View menus, the preset picker, transport controls and the status
 /// readout pinned to the right.
@@ -29,7 +29,7 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
         ui.menu_button("New from template", |ui| {
             ui.label(egui::RichText::new("Commented starting points").small().weak());
             for (i, t) in TEMPLATES.iter().enumerate() {
-                if ui.button(load_builtin(t).meta.name).clicked() {
+                if ui.button(t.name()).clicked() {
                     app.load_template(i);
                     ui.close();
                 }
@@ -48,6 +48,14 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
         if ui.button("Save as…").clicked() {
             app.save_as();
         }
+        let is_saved = matches!(app.state.source, PresetSource::Saved(_));
+        if ui
+            .add_enabled(is_saved, egui::Button::new("Delete saved preset…"))
+            .on_hover_text("Remove this preset from where it is saved; the scene stays open")
+            .clicked()
+        {
+            app.delete_saved_preset();
+        }
         ui.separator();
         if ui.button("Export bundle…").on_hover_text("Download / write a single-file preset bundle").clicked() {
             app.export();
@@ -55,7 +63,8 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
         if ui.button("Import bundle…").on_hover_text("Load a preset bundle file").clicked() {
             app.import();
         }
-        if ui.button("Copy share link").on_hover_text("A link that opens this exact scene in the web version").clicked() {
+        if ui.button("Copy share link").on_hover_text("A link that opens this exact scene in the web version").clicked()
+        {
             app.share(&ctx);
         }
         if !platform::is_web() {
@@ -70,7 +79,9 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
 fn image_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button("Image", |ui| {
         ui.label(egui::RichText::new("Save the grid as a PNG").small().weak());
-        for (s, label) in [(1u32, "Export PNG, 1 px per cell"), (2, "Export PNG, 2 px per cell"), (4, "Export PNG, 4 px per cell")] {
+        for (s, label) in
+            [(1u32, "Export PNG, 1 px per cell"), (2, "Export PNG, 2 px per cell"), (4, "Export PNG, 4 px per cell")]
+        {
             if ui.button(label).clicked() {
                 app.export_image(s);
             }
@@ -98,20 +109,15 @@ fn view_menu(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn preset_picker(app: &mut App, ui: &mut egui::Ui) {
-    let label = if app.state.modified {
-        format!("{} *", app.state.preset_name)
-    } else {
-        app.state.preset_name.clone()
-    };
+    let label = if app.state.modified { format!("{} *", app.state.preset_name) } else { app.state.preset_name.clone() };
     let mut to_load: Option<(Preset, PresetSource)> = None;
     let mut to_load_saved: Option<platform::SavedLocation> = None;
     egui::ComboBox::from_id_salt("preset").selected_text(label).width(240.0).show_ui(ui, |ui| {
         ui.label(egui::RichText::new("Built-in").small().weak());
         for (i, b) in BUILTINS.iter().enumerate() {
-            let p = load_builtin(b);
             let selected = app.state.source == PresetSource::Builtin(i);
-            if ui.selectable_label(selected, &p.meta.name).clicked() {
-                to_load = Some((p, PresetSource::Builtin(i)));
+            if ui.selectable_label(selected, b.name()).clicked() {
+                to_load = Some((load_builtin(b), PresetSource::Builtin(i)));
             }
         }
         if !app.state.saved_presets.is_empty() {
@@ -155,7 +161,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn status(app: &mut App, ui: &mut egui::Ui) {
-    let frame = app.sim.lock().unwrap().frame();
+    let frame = lock(&app.sim).frame();
     let steps_per_sec = app.rate.update(web_time::Instant::now(), frame);
     let dt = ui.input(|i| i.stable_dt).max(1e-6);
     // Status lives at the right edge, so the controls keep a stable position.
@@ -187,10 +193,7 @@ pub fn save_dialog(app: &mut App, ctx: &egui::Context) {
             ui.label("Name");
             let resp = ui.text_edit_singleline(&mut name);
             if dialog.confirm_overwrite {
-                ui.colored_label(
-                    theme::WARN,
-                    "A preset with this name already exists. Save again to overwrite it.",
-                );
+                ui.colored_label(theme::WARN, "A preset with this name already exists. Save again to overwrite it.");
             }
             ui.horizontal(|ui| {
                 let label = if dialog.confirm_overwrite { "Overwrite" } else { "Save" };
@@ -226,7 +229,7 @@ pub fn save_dialog(app: &mut App, ctx: &egui::Context) {
 pub fn stats_readout(app: &App, ui: &mut egui::Ui) {
     let Some(last) = app.state.stats.back() else { return };
     let cells = {
-        let c = app.state.pending.clone();
+        let c = &app.state.applied;
         (c.width as f32 * c.height as f32).max(1.0)
     };
     ui.separator();
@@ -267,7 +270,7 @@ pub fn stats_readout(app: &App, ui: &mut egui::Ui) {
 /// Rewind strip under the viewport: snapshot slider, step label and snapshot interval.
 pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
     let (len, cap, interval, selected_meta) = {
-        let sim = app.sim.lock().unwrap();
+        let sim = lock(&app.sim);
         let len = sim.history_len();
         let idx = app.scrub.unwrap_or(len.saturating_sub(1)).min(len.saturating_sub(1));
         (len, sim.history_capacity(), sim.snapshot_interval(), sim.history_meta(idx))
@@ -281,7 +284,8 @@ pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
             let newest = len - 1;
             let mut pos = if app.state.playing { newest } else { app.scrub.unwrap_or(newest).min(newest) };
             let slider = egui::Slider::new(&mut pos, 0..=newest).show_value(false);
-            let resp = ui.add_sized([ui.available_width() - 330.0, 18.0], slider);
+            // Leave room for the labels on the right; never collapse below a usable width.
+            let resp = ui.add_sized([(ui.available_width() - 330.0).max(80.0), 18.0], slider);
             if resp.changed() {
                 app.scrub_to(pos);
             }
@@ -292,16 +296,16 @@ pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.label(egui::RichText::new("every").weak());
         let mut iv = interval;
-        egui::ComboBox::from_id_salt("snapshot-interval")
-            .selected_text(format!("{iv} steps"))
-            .width(90.0)
-            .show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("snapshot-interval").selected_text(format!("{iv} steps")).width(90.0).show_ui(
+            ui,
+            |ui| {
                 for v in [1u32, 2, 5, 10, 30, 100] {
                     ui.selectable_value(&mut iv, v, format!("{v} steps"));
                 }
-            });
+            },
+        );
         if iv != interval {
-            app.sim.lock().unwrap().set_snapshot_interval(iv);
+            lock(&app.sim).set_snapshot_interval(iv);
         }
     });
     if app.state.playing {
@@ -313,7 +317,7 @@ pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
 pub fn record_dialog(app: &mut App, ctx: &egui::Context) {
     let Some(mut settings) = app.record_dialog else { return };
     let (w, h) = {
-        let sim = app.sim.lock().unwrap();
+        let sim = lock(&app.sim);
         let c = sim.config();
         (c.width, c.height)
     };
@@ -338,7 +342,12 @@ pub fn record_dialog(app: &mut App, ctx: &egui::Context) {
                     }
                 });
                 ui.end_row();
-                let cap = crate::sim::record::max_frames(w * settings.scale, h * settings.scale, crate::sim::record::FRAME_BUDGET_BYTES).min(3600);
+                let cap = crate::sim::record::max_frames(
+                    w * settings.scale,
+                    h * settings.scale,
+                    crate::sim::record::FRAME_BUDGET_BYTES,
+                )
+                .min(3600);
                 settings.frames = settings.frames.clamp(1, cap);
                 ui.label("frames");
                 ui.add(egui::Slider::new(&mut settings.frames, 1..=cap).logarithmic(true));
@@ -347,8 +356,12 @@ pub fn record_dialog(app: &mut App, ctx: &egui::Context) {
                 ui.add(egui::Slider::new(&mut settings.fps, 1..=60));
                 ui.end_row();
                 ui.label("image size");
-                ui.label(format!("{} × {} px, {:.0} MB buffered", w * settings.scale, h * settings.scale,
-                    (w * settings.scale) as f64 * (h * settings.scale) as f64 * 4.0 * settings.frames as f64 / 1e6));
+                ui.label(format!(
+                    "{} × {} px, {:.0} MB buffered",
+                    w * settings.scale,
+                    h * settings.scale,
+                    (w * settings.scale) as f64 * (h * settings.scale) as f64 * 4.0 * settings.frames as f64 / 1e6
+                ));
                 ui.end_row();
             });
             ui.horizontal(|ui| {

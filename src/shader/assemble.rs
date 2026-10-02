@@ -1,5 +1,7 @@
 //! Wraps user-written WGSL in a fixed prelude (bindings, helpers) and epilogue (entry points).
 
+use crate::shader::highlight::{TokenKind, tokenize};
+
 #[derive(Debug, Clone)]
 pub struct Assembled {
     pub source: String,
@@ -19,7 +21,7 @@ pub const GLOBALS_WGSL: &str = r#"struct Globals {
     row: u32,
     prev_row: u32,
     blend: f32,
-    _pad0: u32,
+    has_other: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -33,8 +35,8 @@ const RULE_PRELUDE: &str = r#"@group(0) @binding(0) var src: texture_2d<f32>;
 
 // Layer B's cell at (x, y), wrapping at the edges; all zeros when there is no layer B.
 fn other(x: i32, y: i32) -> vec4<f32> {
+    if (globals.has_other == 0u) { return vec4<f32>(0.0); }
     let dims = textureDimensions(other_tex);
-    if (dims.x <= 1u && dims.y <= 1u) { return vec4<f32>(0.0); }
     let w = i32(dims.x);
     let h = i32(dims.y);
     return textureLoad(other_tex, vec2<u32>(u32(((x % w) + w) % w), u32(((y % h) + h) % h)), 0);
@@ -190,8 +192,8 @@ const RENDER_PRELUDE: &str = r#"@group(0) @binding(0) var state: texture_2d<f32>
 
 // Layer B's cell at (x, y), wrapping at the edges; all zeros when there is no layer B.
 fn other(x: i32, y: i32) -> vec4<f32> {
+    if (globals.has_other == 0u) { return vec4<f32>(0.0); }
     let dims = textureDimensions(other_tex);
-    if (dims.x <= 1u && dims.y <= 1u) { return vec4<f32>(0.0); }
     let w = i32(dims.x);
     let h = i32(dims.y);
     return textureLoad(other_tex, vec2<u32>(u32(((x % w) + w) % w), u32(((y % h) + h) % h)), 0);
@@ -401,14 +403,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Renames the function declared as `fn <from>` to `fn <to>`, working on tokens so that
+/// comments and the spacing between `fn` and the name do not matter. The line count is
+/// preserved, so error locations stay valid.
+fn rename_fn(src: &str, from: &str, to: &str) -> String {
+    let tokens = tokenize(src);
+    let mut out = String::with_capacity(src.len() + to.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let (kind, text) = tokens[i];
+        if kind == TokenKind::Keyword && text == "fn" {
+            let mut j = i + 1;
+            while j < tokens.len() && tokens[j].0 == TokenKind::Whitespace {
+                j += 1;
+            }
+            if j < tokens.len() && matches!(tokens[j].0, TokenKind::Ident | TokenKind::Builtin) && tokens[j].1 == from {
+                for (_, t) in &tokens[i..j] {
+                    out.push_str(t);
+                }
+                out.push_str(to);
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push_str(text);
+        i += 1;
+    }
+    out
+}
+
 /// Two rule shaders in one module: `rule` is renamed to `rule_a` / `rule_b` and the entry point
 /// mixes their results by `globals.blend`. Helper functions the two rules define must not share
 /// names.
 pub fn assemble_rule_pair(rule_a: &str, rule_b: &str, params_struct: &str) -> Assembled {
     let head = format!("{GLOBALS_WGSL}{params_struct}{RULE_PRELUDE}");
     let user_line_offset = head.lines().count();
-    let a = rule_a.replace("fn rule(", "fn rule_a(");
-    let b = rule_b.replace("fn rule(", "fn rule_b(");
+    let a = rename_fn(rule_a, "rule", "rule_a");
+    let b = rename_fn(rule_b, "rule", "rule_b");
     let a_lines = a.lines().count().max(1);
     let b_lines = b.lines().count().max(1);
     let a = if a.ends_with('\n') { a } else { format!("{a}\n") };
@@ -457,10 +488,7 @@ mod tests {
 
     #[test]
     fn rule_contains_bindings_and_entry() {
-        let a = assemble_rule(
-            "fn rule(pos: vec2<u32>) -> vec4<f32> { return vec4<f32>(0.0); }",
-            &params_wgsl(&[]),
-        );
+        let a = assemble_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return vec4<f32>(0.0); }", &params_wgsl(&[]));
         assert!(a.source.contains("@group(0) @binding(0) var src: texture_2d<f32>;"));
         assert!(a.source.contains("@group(0) @binding(1) var dst: texture_storage_2d<rgba32float, write>;"));
         assert!(a.source.contains("@compute @workgroup_size(16, 16)"));
@@ -504,6 +532,16 @@ mod tests {
         assert_eq!(lines[p.user_line_offset], "fn rule_a(pos: vec2<u32>) -> vec4<f32> { return on(); }");
         assert_eq!(p.user_line_count, 2);
         assert_eq!(p.rule_b_line_offset, Some(p.user_line_offset + 1));
+    }
+
+    #[test]
+    fn rename_fn_ignores_comments_and_tolerates_spacing() {
+        let src = "// the fn rule( below is renamed\nfn  rule (pos: vec2<u32>) -> vec4<f32> { return rule_helper(); }\nfn rule_helper() -> vec4<f32> { return on(); }\n";
+        let out = rename_fn(src, "rule", "rule_a");
+        assert!(out.starts_with("// the fn rule( below is renamed\n"), "{out}");
+        assert!(out.contains("fn  rule_a (pos"), "{out}");
+        assert!(out.contains("fn rule_helper()"), "other functions keep their names: {out}");
+        assert_eq!(out.lines().count(), src.lines().count());
     }
 
     #[test]

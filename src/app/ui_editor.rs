@@ -1,5 +1,5 @@
-use super::theme;
 use super::App;
+use super::theme;
 use crate::shader::highlight::layouter;
 use crate::shader::validate::ShaderFile;
 
@@ -52,7 +52,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
             if ui.add(apply).clicked() {
                 app.apply_shaders();
             }
-            let n_err = app.state.errors.iter().filter(|e| e.shader_file() == Some(file)).count();
+            let n_err = app.state.errors.iter().filter(|e| e.file == file).count();
             if n_err > 0 {
                 ui.colored_label(theme::ERROR, format!("{n_err} error(s)"));
             }
@@ -67,8 +67,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
                 ShaderFile::Post => &app.state.editor.post,
             };
             let idx = char_index_of_line(text, line);
-            let mut st =
-                egui::widgets::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+            let mut st = egui::widgets::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
             st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(idx))));
             st.store(ui.ctx(), id);
             ui.memory_mut(|m| m.request_focus(id));

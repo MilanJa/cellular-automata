@@ -2,14 +2,17 @@
 
 use std::cell::RefCell;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
-use super::{name_from_storage_key, storage_key, SavedLocation};
-use crate::preset::bundle::{bundle_filename, from_bundle, to_bundle};
+use super::{DroppedFile, SavedLocation, name_from_storage_key, storage_key};
 use crate::preset::Preset;
+use crate::preset::bundle::{bundle_filename, from_bundle, to_bundle};
 
 pub const SAVED_SECTION_LABEL: &str = "Browser storage";
+
+/// `localStorage` key for the unsaved draft (outside the preset prefix, so it is never listed).
+const DRAFT_KEY: &str = "ca.draft";
 
 fn local_storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -38,11 +41,8 @@ pub fn load_saved(location: &SavedLocation) -> anyhow::Result<Preset> {
     match location {
         SavedLocation::Browser(key) => {
             let store = local_storage().ok_or_else(|| anyhow::anyhow!("localStorage unavailable"))?;
-            let text = store
-                .get_item(key)
-                .ok()
-                .flatten()
-                .ok_or_else(|| anyhow::anyhow!("no preset stored under {key}"))?;
+            let text =
+                store.get_item(key).ok().flatten().ok_or_else(|| anyhow::anyhow!("no preset stored under {key}"))?;
             from_bundle(&text)
         }
         SavedLocation::Folder(_) => anyhow::bail!("folders are not available in the browser"),
@@ -68,10 +68,19 @@ pub fn location_for_name(name: &str) -> (SavedLocation, bool) {
     (SavedLocation::Browser(key), exists)
 }
 
-pub fn delete_saved(location: &SavedLocation) {
-    if let (SavedLocation::Browser(key), Some(store)) = (location, local_storage()) {
-        let _ = store.remove_item(key);
+pub fn delete_saved(location: &SavedLocation) -> anyhow::Result<()> {
+    match location {
+        SavedLocation::Browser(key) => {
+            let store = local_storage().ok_or_else(|| anyhow::anyhow!("localStorage unavailable"))?;
+            store.remove_item(key).map_err(|_| anyhow::anyhow!("localStorage refused to remove {key}"))
+        }
+        SavedLocation::Folder(_) => anyhow::bail!("folders are not available in the browser"),
     }
+}
+
+/// The browser's own confirm dialog.
+pub fn confirm(title: &str, text: &str) -> bool {
+    web_sys::window().and_then(|w| w.confirm_with_message(&format!("{title}\n\n{text}")).ok()).unwrap_or(false)
 }
 
 /// Export: trigger a download of the bundle.
@@ -99,8 +108,8 @@ fn download(filename: &str, mime: &str, bytes: &[u8]) -> anyhow::Result<()> {
     opts.set_type(mime);
     let blob = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &opts)
         .map_err(|_| anyhow::anyhow!("could not create blob"))?;
-    let url = web_sys::Url::create_object_url_with_blob(&blob)
-        .map_err(|_| anyhow::anyhow!("could not create object URL"))?;
+    let url =
+        web_sys::Url::create_object_url_with_blob(&blob).map_err(|_| anyhow::anyhow!("could not create object URL"))?;
     let a: web_sys::HtmlAnchorElement = document
         .create_element("a")
         .map_err(|_| anyhow::anyhow!("could not create anchor"))?
@@ -114,7 +123,7 @@ fn download(filename: &str, mime: &str, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 thread_local! {
-    static UPLOADED: RefCell<Option<String>> = const { RefCell::new(None) };
+    static UPLOADED: RefCell<Option<Result<String, String>>> = const { RefCell::new(None) };
 }
 
 /// Import: open the browser file picker; the file's text is queued for `poll_import`.
@@ -131,11 +140,11 @@ pub fn request_import() {
         let Ok(reader) = web_sys::FileReader::new() else { return };
         let reader_for_cb = reader.clone();
         let on_load = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-            if let Ok(result) = reader_for_cb.result()
-                && let Some(text) = result.as_string()
-            {
-                UPLOADED.with(|u| *u.borrow_mut() = Some(text));
-            }
+            let result = match reader_for_cb.result().ok().and_then(|r| r.as_string()) {
+                Some(text) => Ok(text),
+                None => Err("the file could not be read as text".to_string()),
+            };
+            UPLOADED.with(|u| *u.borrow_mut() = Some(result));
         });
         reader.set_onload(Some(on_load.as_ref().unchecked_ref()));
         on_load.forget();
@@ -148,7 +157,10 @@ pub fn request_import() {
 
 pub fn poll_import() -> Option<anyhow::Result<Preset>> {
     let text = UPLOADED.with(|u| u.borrow_mut().take())?;
-    Some(from_bundle(&text))
+    Some(match text {
+        Ok(text) => from_bundle(&text),
+        Err(message) => Err(anyhow::anyhow!(message)),
+    })
 }
 
 thread_local! {
@@ -188,27 +200,44 @@ pub fn poll_image_import() -> Option<Vec<u8>> {
 }
 
 thread_local! {
-    static DROPPED: RefCell<Vec<(String, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+    static DROPPED: RefCell<Vec<DroppedFile>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Reads a dropped file asynchronously and queues it for `poll_dropped_files`.
 pub fn queue_dropped_file(file: &dyn egui::DroppedFile) {
     let name = file.path().to_string_lossy().to_string();
     let Some(web_file) = file.web_file().cloned() else {
-        DROPPED.with(|d| d.borrow_mut().push((format!("__error__{name}: no file handle"), Vec::new())));
+        DROPPED.with(|d| d.borrow_mut().push(Err(format!("{name}: no file handle"))));
         return;
     };
     wasm_bindgen_futures::spawn_local(async move {
         let entry = match wasm_bindgen_futures::JsFuture::from(web_file.array_buffer()).await {
-            Ok(buf) => (name, js_sys::Uint8Array::new(&buf).to_vec()),
-            Err(_) => (format!("__error__{name}: could not read"), Vec::new()),
+            Ok(buf) => Ok((name, js_sys::Uint8Array::new(&buf).to_vec())),
+            Err(_) => Err(format!("{name}: could not read")),
         };
         DROPPED.with(|d| d.borrow_mut().push(entry));
     });
 }
 
-pub fn poll_dropped_files() -> Vec<(String, Vec<u8>)> {
+pub fn poll_dropped_files() -> Vec<DroppedFile> {
     DROPPED.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
+/// Remembers unsaved work so closing the tab does not lose it.
+pub fn save_draft(bundle_text: &str) {
+    if let Some(store) = local_storage() {
+        let _ = store.set_item(DRAFT_KEY, bundle_text);
+    }
+}
+
+pub fn load_draft() -> Option<String> {
+    local_storage()?.get_item(DRAFT_KEY).ok().flatten()
+}
+
+pub fn clear_draft() {
+    if let Some(store) = local_storage() {
+        let _ = store.remove_item(DRAFT_KEY);
+    }
 }
 
 /// `?preset=<id>` from the page URL.

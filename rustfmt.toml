@@ -1,0 +1,4 @@
+# Wider lines and compact one-line struct literals / calls, matching the style the code
+# was written in (GPU descriptor structs get very tall otherwise).
+max_width = 120
+use_small_heuristics = "Max"

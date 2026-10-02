@@ -58,9 +58,8 @@ mod tests {
 
     #[test]
     fn apng_has_the_requested_frames_and_decodes() {
-        let frames: Vec<Vec<u8>> = (0..3u8)
-            .map(|i| (0..2 * 2 * 4).map(|j| (i * 40 + j as u8) % 255).collect())
-            .collect();
+        let frames: Vec<Vec<u8>> =
+            (0..3u8).map(|i| (0..2 * 2 * 4).map(|j| (i * 40 + j as u8) % 255).collect()).collect();
         let bytes = encode_apng(2, 2, &frames, 30).unwrap();
         assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));

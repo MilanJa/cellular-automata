@@ -24,9 +24,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "cellular-automata",
         options,
-        Box::new(move |cc| {
-            Ok(Box::new(cellular_automata::app::App::with_preset(cc, start_preset.as_deref())))
-        }),
+        Box::new(move |cc| Ok(Box::new(cellular_automata::app::App::with_preset(cc, start_preset.as_deref())))),
     )
 }
 
@@ -51,9 +49,7 @@ fn main() {
     };
 
     wasm_bindgen_futures::spawn_local(async move {
-        let document = web_sys::window()
-            .and_then(|w| w.document())
-            .expect("no document");
+        let document = web_sys::window().and_then(|w| w.document()).expect("no document");
         let canvas = document
             .get_element_by_id("ca_canvas")
             .expect("missing #ca_canvas")
@@ -64,7 +60,7 @@ fn main() {
         let start = match platform::startup_share_code()
             .and_then(|code| cellular_automata::preset::share::decode_share_code(&code).ok())
         {
-            Some(preset) => Start::Shared(preset),
+            Some(preset) => Start::Shared(Box::new(preset)),
             None => platform::startup_preset_from_url().map_or(Start::Default, Start::Named),
         };
         let result = eframe::WebRunner::new()
