@@ -44,6 +44,7 @@ mod tests {
     fn there_are_four_builtins_with_unique_ids() {
         assert_eq!(BUILTINS.len(), 4);
         let mut ids: Vec<_> = BUILTINS.iter().map(|b| b.id).collect();
+        ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 4);
     }
@@ -71,17 +72,14 @@ mod tests {
     }
 
     #[test]
-    fn toml_params_that_shader_does_not_declare_are_ignored() {
-        let b = &BUILTINS[0];
-        let mut preset = load_builtin(b);
+    fn toml_override_from_a_builtin_is_applied_and_unknown_keys_are_ignored() {
+        use crate::shader::params::ParamValue;
+        // Rule 110 overrides `rule_number` in its preset.toml; add an undeclared key too.
+        let mut preset = load_builtin(&BUILTINS[1]);
         preset.meta.params.insert("ghost".into(), toml::Value::Float(1.0));
         let specs = parse_params(&preset.rule).unwrap();
-        let known: Vec<_> = preset
-            .meta
-            .params
-            .keys()
-            .filter(|k| specs.iter().any(|s| &s.name == *k))
-            .collect();
-        assert!(!known.iter().any(|k| *k == "ghost"));
+        let values = crate::app::state::resolve_values(&specs, &preset.meta.params, &Default::default());
+        assert_eq!(values["rule_number"], ParamValue::I32(110));
+        assert!(!values.contains_key("ghost"));
     }
 }

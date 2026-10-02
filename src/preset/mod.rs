@@ -95,11 +95,18 @@ pub fn param_value_from_toml(ty: ParamType, v: &toml::Value) -> Option<ParamValu
     })
 }
 
+/// Widens an f32 through its shortest round-trip decimal, so `0.1f32` becomes `0.1` in the
+/// file rather than `0.10000000149011612`.
+fn f32_to_toml_float(x: f32) -> f64 {
+    x.to_string().parse::<f64>().unwrap_or(x as f64)
+}
+
 pub fn param_value_to_toml(v: &ParamValue) -> toml::Value {
-    let arr =
-        |a: &[f32]| toml::Value::Array(a.iter().map(|x| toml::Value::Float(*x as f64)).collect());
+    let arr = |a: &[f32]| {
+        toml::Value::Array(a.iter().map(|x| toml::Value::Float(f32_to_toml_float(*x))).collect())
+    };
     match v {
-        ParamValue::F32(x) => toml::Value::Float(*x as f64),
+        ParamValue::F32(x) => toml::Value::Float(f32_to_toml_float(*x)),
         ParamValue::I32(x) => toml::Value::Integer(*x as i64),
         ParamValue::Bool(b) => toml::Value::Boolean(*b),
         ParamValue::Vec2(a) => arr(a),
@@ -309,5 +316,15 @@ mod tests {
         b.save_dir(&dir.path().join("mine")).unwrap();
         let names: Vec<String> = scan_presets_dir(dir.path()).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, vec!["Mine".to_string()]);
+    }
+
+    #[test]
+    fn f32_params_serialise_as_short_decimals() {
+        let v = param_value_to_toml(&ParamValue::F32(0.1));
+        assert_eq!(v, toml::Value::Float(0.1));
+        let v = param_value_to_toml(&ParamValue::Vec3([0.3, 1.0, 0.037]));
+        assert_eq!(v, toml::Value::Array(vec![toml::Value::Float(0.3), toml::Value::Float(1.0), toml::Value::Float(0.037)]));
+        let text = toml::to_string(&toml::Table::from_iter([("fade".to_string(), param_value_to_toml(&ParamValue::F32(40.0)))])).unwrap();
+        assert_eq!(text.trim(), "fade = 40.0");
     }
 }

@@ -137,7 +137,7 @@ mod tests {
     fn eof_error_clamps_to_last_user_line() {
         let user = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    return vec4<f32>(0.0);\n";
         let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
-        assert!(errs[0].line >= 1 && errs[0].line <= 2, "line was {}", errs[0].line);
+        assert_eq!(errs[0].line, 2, "{:?}", errs[0]);
     }
 
     #[test]
