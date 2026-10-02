@@ -9,6 +9,16 @@ use egui::PaintCallbackInfo;
 use crate::sim::paint::Stroke;
 use crate::sim::Simulation;
 
+/// A second automaton that layer A can read through `other()`, and that reads layer A back.
+pub struct LayerB {
+    pub sim: Simulation,
+    pub name: String,
+    /// A's state mirrored for B to read.
+    pub mirror_a: eframe::wgpu::Texture,
+    /// B's state mirrored for A to read.
+    pub mirror_b: eframe::wgpu::Texture,
+}
+
 /// Largest `grid_aspect` rectangle centred inside a `viewport_w x viewport_h` box.
 /// Returns `(x, y, w, h)` in the same units as the inputs.
 pub fn letterbox(viewport_w: f32, viewport_h: f32, grid_aspect: f32) -> (f32, f32, f32, f32) {
@@ -33,6 +43,7 @@ pub struct ViewportCallback {
     pub scene_pixels: (u32, u32),
     /// Rewind request: restore this snapshot (oldest first) before anything else this frame.
     pub restore: Option<usize>,
+    pub layer_b: Option<Arc<Mutex<LayerB>>>,
 }
 
 impl CallbackTrait for ViewportCallback {
@@ -51,6 +62,14 @@ impl CallbackTrait for ViewportCallback {
         }
         if !self.strokes.is_empty() {
             sim.paint(egui_encoder, &self.strokes);
+        }
+        if let Some(b) = &self.layer_b {
+            // Both layers see each other's state from before this frame's steps.
+            let mut b = b.lock().unwrap();
+            sim.mirror_into(egui_encoder, &b.mirror_a);
+            b.sim.mirror_into(egui_encoder, &b.mirror_b);
+            b.sim.set_time(self.time);
+            b.sim.step(egui_encoder, self.steps);
         }
         sim.step(egui_encoder, self.steps);
         if self.steps > 0 || !self.strokes.is_empty() {
@@ -87,6 +106,7 @@ pub fn show_viewport(
     time: f32,
     strokes: Vec<Stroke>,
     restore: Option<usize>,
+    layer_b: Option<Arc<Mutex<LayerB>>>,
 ) -> (egui::Rect, egui::Response) {
     let size = ui.available_size();
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
@@ -99,7 +119,7 @@ pub fn show_viewport(
     let ppp = ui.ctx().pixels_per_point();
     let (_, _, lw, lh) = letterbox(rect.width() * ppp, rect.height() * ppp, grid_aspect);
     let scene_pixels = ((lw.round() as u32).max(1), (lh.round() as u32).max(1));
-    let cb = ViewportCallback { sim: sim.clone(), steps, time, grid_aspect, strokes, scene_pixels, restore };
+    let cb = ViewportCallback { sim: sim.clone(), steps, time, grid_aspect, strokes, scene_pixels, restore, layer_b };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, cb));
     (rect, response)
 }

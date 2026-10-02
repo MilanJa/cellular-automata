@@ -25,7 +25,7 @@ use crate::sim::paint::{pointer_to_cell, Stroke};
 use crate::sim::record::{encode_apng, max_frames, recording_filename, RecordingSettings, FRAME_BUDGET_BYTES};
 use crate::sim::seed_image::{decode_png, image_to_cells, RgbaImage};
 use crate::sim::Simulation;
-use crate::viewport::show_viewport;
+use crate::viewport::{show_viewport, LayerB};
 use state::{
     build_shaders, diagnostics_from, prepare_preset_load, preset_to_state, resolve_values,
     state_to_preset, AppState, Diagnostic, PresetSource, RateMeter,
@@ -83,6 +83,8 @@ pub struct App {
     /// The rule explorer window, while open.
     pub(crate) explorer: Option<explorer_ui::Explorer>,
     render_state: eframe::egui_wgpu::RenderState,
+    /// Optional second automaton readable from the shaders via `other()`.
+    pub(crate) layer_b: Option<Arc<Mutex<LayerB>>>,
 }
 
 impl App {
@@ -147,6 +149,7 @@ impl App {
             record_dialog: None,
             explorer: None,
             render_state: rs.clone(),
+            layer_b: None,
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
@@ -195,6 +198,7 @@ impl App {
         self.state.modified = false;
         self.state.started = web_time::Instant::now();
         self.push_params();
+        self.sync_layer_b();
     }
 
     /// Starts a new, unsaved preset from one of the embedded templates.
@@ -271,6 +275,7 @@ impl App {
         drop(sim);
         self.state.started = web_time::Instant::now();
         self.clear_stats();
+        self.sync_layer_b();
     }
 
     /// Save in place when the preset already has a home; otherwise behave like Save As.
@@ -506,6 +511,66 @@ impl App {
         self.capture_next_frame();
     }
 
+    /// Loads `preset` as layer B, sized like layer A, and wires both layers' `other()`.
+    pub(crate) fn set_layer_b(&mut self, preset: Option<Preset>) {
+        self.layer_b = None;
+        let mut a = self.sim.lock().unwrap();
+        let Some(preset) = preset else {
+            a.set_other(None);
+            return;
+        };
+        let (loaded, name) = match prepare_preset_load(&preset) {
+            Ok(l) => {
+                let name = l.name.clone();
+                (l, name)
+            }
+            Err(errors) => {
+                drop(a);
+                self.state.errors = diagnostics_from(errors);
+                return;
+            }
+        };
+        let config = SimConfigLike::from(a.config()).with_init(loaded.config.init.clone(), loaded.config.seed);
+        let rs = &self.render_state;
+        let mut b = Simulation::new(rs.device.clone(), rs.queue.clone(), rs.target_format, config);
+        if let Err(errors) = b.set_pipelines(&loaded.rule, &loaded.render, &loaded.post) {
+            drop(a);
+            self.state.errors = diagnostics_from(errors);
+            return;
+        }
+        let values = resolve_values(&loaded.specs, &loaded.toml_params, &BTreeMap::new());
+        b.set_params(pack_params(&loaded.specs, &values));
+        b.set_snapshot_interval(u32::MAX);
+        let mirror_a = a.create_mirror_texture();
+        let mirror_b = b.create_mirror_texture();
+        a.set_other(Some(&mirror_b));
+        b.set_other(Some(&mirror_a));
+        drop(a);
+        self.layer_b = Some(Arc::new(Mutex::new(LayerB { sim: b, name, mirror_a, mirror_b })));
+    }
+
+    /// After layer A changed size or mode, rebuild layer B to match.
+    fn sync_layer_b(&mut self) {
+        let Some(b) = &self.layer_b else { return };
+        let a_cfg = self.sim.lock().unwrap().config().clone();
+        let mut b_guard = b.lock().unwrap();
+        let b_cfg = b_guard.sim.config().clone();
+        if b_cfg.width == a_cfg.width && b_cfg.height == a_cfg.height && b_cfg.mode == a_cfg.mode {
+            return;
+        }
+        let new_cfg = crate::sim::SimConfig { mode: a_cfg.mode, width: a_cfg.width, height: a_cfg.height, init: b_cfg.init, seed: b_cfg.seed };
+        b_guard.sim.reconfigure(new_cfg);
+        b_guard.mirror_a = self.sim.lock().unwrap().create_mirror_texture();
+        b_guard.mirror_b = b_guard.sim.create_mirror_texture();
+        self.sim.lock().unwrap().set_other(Some(&b_guard.mirror_b));
+        let mirror_a = b_guard.mirror_a.clone();
+        b_guard.sim.set_other(Some(&mirror_a));
+    }
+
+    pub(crate) fn layer_b_name(&self) -> Option<String> {
+        self.layer_b.as_ref().map(|b| b.lock().unwrap().name.clone())
+    }
+
     pub(crate) fn toggle_explorer(&mut self) {
         if self.explorer.is_some() {
             self.explorer = None;
@@ -731,11 +796,12 @@ impl eframe::App for App {
             let time = self.state.started.elapsed().as_secs_f32();
             let strokes = std::mem::take(&mut self.strokes);
             let restore = self.pending_restore.take();
+            let layer_b = self.layer_b.clone();
             let timeline_height = 26.0;
             let viewport_size = egui::vec2(ui.available_width(), (ui.available_height() - timeline_height).max(1.0));
             let (rect, response) = ui
                 .allocate_ui_with_layout(viewport_size, egui::Layout::top_down(egui::Align::Min), |ui| {
-                    show_viewport(ui, &self.sim, steps, time, strokes, restore)
+                    show_viewport(ui, &self.sim, steps, time, strokes, restore, layer_b)
                 })
                 .inner;
             self.last_viewport = Some(rect);
@@ -748,5 +814,24 @@ impl eframe::App for App {
         }
         ui_topbar::record_dialog(self, &ctx);
         explorer_ui::window(self, &ctx);
+    }
+}
+
+/// Layer B takes A's grid and mode but keeps its own init pattern and seed.
+struct SimConfigLike {
+    mode: crate::preset::Mode,
+    width: u32,
+    height: u32,
+}
+
+impl From<&crate::sim::SimConfig> for SimConfigLike {
+    fn from(c: &crate::sim::SimConfig) -> Self {
+        SimConfigLike { mode: c.mode, width: c.width, height: c.height }
+    }
+}
+
+impl SimConfigLike {
+    fn with_init(self, init: crate::preset::InitPattern, seed: u32) -> crate::sim::SimConfig {
+        crate::sim::SimConfig { mode: self.mode, width: self.width, height: self.height, init, seed }
     }
 }

@@ -71,6 +71,14 @@ to play with). Edit, press Ctrl+Enter, then **Save as…** when you like the res
 Compile errors show in the bottom panel with the line number in *your* source. Click an
 error to jump to it. The previous working shader keeps running until the new one compiles.
 
+## Layers
+
+**Layer B** (Params panel) runs a second preset alongside the main one at the same grid size.
+Both layers' rule and render shaders can read the other layer's previous state with
+`other(x, y)` and `other_alive(x, y)` (zeros when no layer B is loaded), so one automaton can
+gate, seed or colour another. The *Driven by layer B* template is Life that can only grow where
+layer B's `.g` channel is high; load Gray-Scott as layer B to see it.
+
 ## Crossfading two rules
 
 **Rule B** is an optional second rule with the same `fn rule(...)` signature. When it is present,

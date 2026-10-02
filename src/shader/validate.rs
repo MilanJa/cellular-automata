@@ -257,4 +257,14 @@ mod tests {
         let a = assemble_render(render, &params_wgsl(&[]));
         validate(ShaderFile::Render, &a).unwrap_or_else(|e| panic!("{e:?}\n{}", a.source));
     }
+
+    #[test]
+    fn rules_and_renders_can_read_the_other_layer() {
+        let rule = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let x = i32(pos.x);\n    let y = i32(pos.y);\n    return on_if(other(x, y).r > 0.5 || other_alive(x + 1, y));\n}\n";
+        let a = assemble_rule(rule, &params_wgsl(&[]));
+        validate(ShaderFile::Rule, &a).unwrap_or_else(|e| panic!("{e:?}\n{}", a.source));
+        let render = "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> {\n    let p = vec2<i32>(uv * vec2<f32>(globals.size));\n    return gray(cell.r + other(p.x, p.y).g);\n}\n";
+        let a = assemble_render(render, &params_wgsl(&[]));
+        validate(ShaderFile::Render, &a).unwrap_or_else(|e| panic!("{e:?}\n{}", a.source));
+    }
 }

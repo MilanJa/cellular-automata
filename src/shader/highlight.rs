@@ -36,7 +36,7 @@ const BUILTINS: &[&str] = &[
     "cell", "prev_cell", "hash", "rand", "wrap", "noise", "alive", "prev_alive", "neighbours",
     "neighbours4", "moore_sum", "laplacian", "on", "off", "on_if", "gray", "rgb", "hsv", "palette",
     "cell_at", "scene", "prev", "scene_px", "neighbours_hex", "neighbours_tri", "neighbours_tri12",
-    "tri_is_up", "hex_cell", "hex_local", "hex_dist", "tri_cell",
+    "tri_is_up", "hex_cell", "hex_local", "hex_dist", "tri_cell", "other", "other_alive",
 ];
 
 fn is_ident_start(c: char) -> bool {

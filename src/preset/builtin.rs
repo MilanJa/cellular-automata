@@ -52,6 +52,7 @@ pub const TEMPLATES: &[Builtin] = &[
     embedded!("neon_life", "neon_life", post),
     embedded!("post_effects", "templates/post_effects", post),
     embedded!("tri_life", "templates/tri_life"),
+    embedded!("layer_driven", "templates/layer_driven"),
 ];
 
 pub fn load_builtin(b: &Builtin) -> Preset {
@@ -114,11 +115,11 @@ mod tests {
 
     #[test]
     fn templates_have_unique_ids() {
-        assert_eq!(TEMPLATES.len(), 8);
+        assert_eq!(TEMPLATES.len(), 9);
         let mut ids: Vec<_> = TEMPLATES.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 9);
     }
 
     #[test]

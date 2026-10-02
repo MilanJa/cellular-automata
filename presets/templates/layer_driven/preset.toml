@@ -1,0 +1,12 @@
+name = "Driven by layer B"
+mode = "2d"
+width = 256
+height = 256
+steps_per_frame = 2
+seed = 4
+
+[init]
+kind = "random"
+density = 0.2
+
+[params]

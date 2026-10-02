@@ -140,6 +140,39 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
 
     ui.separator();
+    ui.heading("Layer B");
+    ui.label(
+        egui::RichText::new("A second automaton running alongside; shaders read it with other(x, y).")
+            .weak(),
+    );
+    ui.horizontal(|ui| {
+        let current = app.layer_b_name().unwrap_or_else(|| "none".to_string());
+        let mut pick: Option<Option<crate::preset::Preset>> = None;
+        egui::ComboBox::from_id_salt("layer-b").selected_text(current).width(220.0).show_ui(ui, |ui| {
+            if ui.selectable_label(app.layer_b.is_none(), "none").clicked() {
+                pick = Some(None);
+            }
+            for b in crate::preset::builtin::BUILTINS {
+                let p = crate::preset::builtin::load_builtin(b);
+                if ui.selectable_label(false, &p.meta.name).clicked() {
+                    pick = Some(Some(p));
+                }
+            }
+            for (name, location) in app.state.saved_presets.clone() {
+                if ui.selectable_label(false, &name).clicked() {
+                    match crate::platform::load_saved(&location) {
+                        Ok(p) => pick = Some(Some(p)),
+                        Err(e) => app.report(format!("load failed: {e:#}")),
+                    }
+                }
+            }
+        });
+        if let Some(choice) = pick {
+            app.set_layer_b(choice);
+        }
+    });
+
+    ui.separator();
     ui.heading("Seed image");
     ui.label(egui::RichText::new("Image > Seed grid from image…, or drop a PNG on the window.").weak());
     let mut reapply = false;

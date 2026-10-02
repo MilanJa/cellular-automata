@@ -104,6 +104,9 @@ pub struct Simulation {
     sampler: wgpu::Sampler,
     /// Viewport-resolution scene and post targets; created on first frame, resized on demand.
     scene: Option<SceneTargets>,
+    /// What `other()` reads: layer B's mirror, or a 1x1 zero texture.
+    other_view: wgpu::TextureView,
+    empty_other_view: wgpu::TextureView,
     /// Rewind snapshots: one grid-sized texture per slot plus the ring that orders them.
     history_tex: Vec<wgpu::Texture>,
     history: SnapshotRing,
@@ -158,6 +161,16 @@ impl Simulation {
             },
             count: None,
         };
+        let other_tex_entry = |visibility: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let compute_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ca compute layout"),
             entries: &[
@@ -174,12 +187,36 @@ impl Simulation {
                 },
                 uniform(2),
                 uniform(3),
+                other_tex_entry(wgpu::ShaderStages::COMPUTE),
             ],
         });
         let render_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ca render layout"),
-            entries: &[sampled(wgpu::ShaderStages::FRAGMENT), uniform(2), uniform(3)],
+            entries: &[
+                sampled(wgpu::ShaderStages::FRAGMENT),
+                uniform(2),
+                uniform(3),
+                other_tex_entry(wgpu::ShaderStages::FRAGMENT),
+            ],
         });
+        // With no layer B, `other()` reads this 1x1 zero texture.
+        let empty_other = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ca empty other"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &empty_other, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::bytes_of(&[0.0f32; 4]),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(16), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let empty_other_view = empty_other.create_view(&Default::default());
         let paint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ca paint layout"),
             entries: &[
@@ -408,6 +445,7 @@ impl Simulation {
             &params_buf,
             &paint_buf,
             &stats_buf,
+            &empty_other_view,
             config.width,
             config.height,
         );
@@ -455,6 +493,8 @@ impl Simulation {
             blit_pipeline,
             sampler,
             scene: None,
+            other_view: empty_other_view.clone(),
+            empty_other_view,
             history_tex,
             history: SnapshotRing::new(history_capacity),
             snapshot_interval: DEFAULT_INTERVAL,
@@ -726,12 +766,57 @@ impl Simulation {
                 &self.params_buf,
                 &self.paint_buf,
                 &self.stats_buf,
+                &self.other_view,
                 config.width,
                 config.height,
             );
         }
         self.config = config;
         self.reset();
+    }
+
+    // ---- layers ----
+
+    /// A grid-sized texture another layer can mirror its state into for this layer to read.
+    pub fn create_mirror_texture(&self) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ca layer mirror"),
+            size: wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    }
+
+    /// Copies the current state into `dst` (a mirror texture of the same size).
+    pub fn mirror_into(&self, encoder: &mut wgpu::CommandEncoder, dst: &wgpu::Texture) {
+        copy_whole(encoder, &self.textures.tex[self.cur], dst, self.config.width, self.config.height);
+    }
+
+    /// Makes `other()` read `mirror` (or nothing). Rebuilds the compute and render bind groups.
+    pub fn set_other(&mut self, mirror: Option<&wgpu::Texture>) {
+        self.other_view = match mirror {
+            Some(t) => t.create_view(&Default::default()),
+            None => self.empty_other_view.clone(),
+        };
+        let views = [
+            self.textures.tex[0].create_view(&Default::default()),
+            self.textures.tex[1].create_view(&Default::default()),
+        ];
+        let (compute, render) = state_bind_groups(
+            &self.device,
+            &self.compute_layout,
+            &self.render_layout,
+            &views,
+            &self.globals_buf,
+            &self.params_buf,
+            &self.other_view,
+        );
+        self.textures.compute_bind_groups = compute;
+        self.textures.render_bind_groups = render;
     }
 
     // ---- rewind ----
@@ -1272,6 +1357,44 @@ fn copy_rows(
     );
 }
 
+/// Compute (`[i]` reads tex i, writes 1-i) and render (`[i]` reads tex i) bind groups.
+fn state_bind_groups(
+    device: &wgpu::Device,
+    compute_layout: &wgpu::BindGroupLayout,
+    render_layout: &wgpu::BindGroupLayout,
+    views: &[wgpu::TextureView; 2],
+    globals_buf: &wgpu::Buffer,
+    params_buf: &wgpu::Buffer,
+    other_view: &wgpu::TextureView,
+) -> ([wgpu::BindGroup; 2], [wgpu::BindGroup; 2]) {
+    let compute_bg = |src: usize| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ca compute bg"),
+            layout: compute_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[src]) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&views[1 - src]) },
+                wgpu::BindGroupEntry { binding: 2, resource: globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(other_view) },
+            ],
+        })
+    };
+    let render_bg = |src: usize| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ca render bg"),
+            layout: render_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[src]) },
+                wgpu::BindGroupEntry { binding: 2, resource: globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(other_view) },
+            ],
+        })
+    };
+    ([compute_bg(0), compute_bg(1)], [render_bg(0), render_bg(1)])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_textures(
     device: &wgpu::Device,
@@ -1283,6 +1406,7 @@ fn create_textures(
     params_buf: &wgpu::Buffer,
     paint_buf: &wgpu::Buffer,
     stats_buf: &wgpu::Buffer,
+    other_view: &wgpu::TextureView,
     width: u32,
     height: u32,
 ) -> Textures {
@@ -1303,38 +1427,8 @@ fn create_textures(
     };
     let tex = [make("ca state A"), make("ca state B")];
     let views = [tex[0].create_view(&Default::default()), tex[1].create_view(&Default::default())];
-    let compute_bg = |src: usize| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ca compute bg"),
-            layout: compute_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&views[src]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&views[1 - src]),
-                },
-                wgpu::BindGroupEntry { binding: 2, resource: globals_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
-            ],
-        })
-    };
-    let render_bg = |src: usize| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ca render bg"),
-            layout: render_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&views[src]),
-                },
-                wgpu::BindGroupEntry { binding: 2, resource: globals_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: params_buf.as_entire_binding() },
-            ],
-        })
-    };
+    let (compute_bind_groups, render_bind_groups) =
+        state_bind_groups(device, compute_layout, render_layout, &views, globals_buf, params_buf, other_view);
     let paint_bg = |dst: usize| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ca paint bg"),
@@ -1365,8 +1459,6 @@ fn create_textures(
             ],
         })
     };
-    let compute_bind_groups = [compute_bg(0), compute_bg(1)];
-    let render_bind_groups = [render_bg(0), render_bg(1)];
     let paint_bind_groups = [paint_bg(0), paint_bg(1)];
     let stats_bind_groups = [stats_bg(0), stats_bg(1)];
     Textures { tex, compute_bind_groups, render_bind_groups, paint_bind_groups, stats_bind_groups }
@@ -1738,6 +1830,41 @@ mod gpu_tests {
         assert_eq!(sim.frame(), 0);
         assert_eq!(read_back(&sim, 0), painted);
         assert_eq!(read_back(&sim, 1), painted, "both ping-pong textures are restored");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn a_layer_can_read_the_other_layers_state() {
+        let _gpu = gpu_lock();
+        // Both layers must live on the same device, as in the app.
+        let Some((device, queue)) = device() else { return };
+        let cfg = |seed| SimConfig { mode: Mode::TwoD, width: 16, height: 16, init: InitPattern::Blank, seed };
+        let mut a = Simulation::new(device.clone(), queue.clone(), wgpu::TextureFormat::Bgra8UnormSrgb, cfg(1));
+        let mut b = Simulation::new(device, queue, wgpu::TextureFormat::Bgra8UnormSrgb, cfg(2));
+        // A copies B; B is everything-on.
+        let p = load_builtin(&BUILTINS[2]);
+        let (_, render, post) = assembled_for(&p.rule, &p.render);
+        let copy_rule = assemble_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return on_if(other(i32(pos.x), i32(pos.y)).r > 0.5); }", &params_wgsl(&[]));
+        let all_on = assemble_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return on(); }", &params_wgsl(&[]));
+        a.set_pipelines(&copy_rule, &render, &post).unwrap();
+        b.set_pipelines(&all_on, &render, &post).unwrap();
+        // Mirrors: each layer reads a copy of the other's state taken before stepping.
+        let mirror_b = b.create_mirror_texture();
+        a.set_other(Some(&mirror_b));
+        let mut enc = a.device.create_command_encoder(&Default::default());
+        b.mirror_into(&mut enc, &mirror_b); // B is still blank here
+        a.step(&mut enc, 1);
+        a.queue.submit([enc.finish()]);
+        assert!(read_back(&a, a.cur).iter().step_by(4).all(|&r| r == 0.0), "blank B -> A stays off");
+        let mut enc = a.device.create_command_encoder(&Default::default());
+        b.step(&mut enc, 1); // B turns fully on
+        b.mirror_into(&mut enc, &mirror_b);
+        a.step(&mut enc, 1);
+        a.queue.submit([enc.finish()]);
+        let live = read_back(&a, a.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
+        assert_eq!(live, 256, "A copied B's all-on state");
+        a.set_other(None);
+        assert!(step_and_check(&mut a, 1).is_none(), "without a layer B, other() reads an empty texture");
     }
 
     #[test]

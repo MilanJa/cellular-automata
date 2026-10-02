@@ -29,6 +29,20 @@ const RULE_PRELUDE: &str = r#"@group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> globals: Globals;
 @group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var other_tex: texture_2d<f32>;
+
+// Layer B's cell at (x, y), wrapping at the edges; all zeros when there is no layer B.
+fn other(x: i32, y: i32) -> vec4<f32> {
+    let dims = textureDimensions(other_tex);
+    if (dims.x <= 1u && dims.y <= 1u) { return vec4<f32>(0.0); }
+    let w = i32(dims.x);
+    let h = i32(dims.y);
+    return textureLoad(other_tex, vec2<u32>(u32(((x % w) + w) % w), u32(((y % h) + h) % h)), 0);
+}
+
+fn other_alive(x: i32, y: i32) -> bool {
+    return other(x, y).r > 0.5;
+}
 
 fn wrap(v: i32, n: u32) -> u32 {
     let ni = i32(n);
@@ -172,6 +186,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 const RENDER_PRELUDE: &str = r#"@group(0) @binding(0) var state: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> globals: Globals;
 @group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var other_tex: texture_2d<f32>;
+
+// Layer B's cell at (x, y), wrapping at the edges; all zeros when there is no layer B.
+fn other(x: i32, y: i32) -> vec4<f32> {
+    let dims = textureDimensions(other_tex);
+    if (dims.x <= 1u && dims.y <= 1u) { return vec4<f32>(0.0); }
+    let w = i32(dims.x);
+    let h = i32(dims.y);
+    return textureLoad(other_tex, vec2<u32>(u32(((x % w) + w) % w), u32(((y % h) + h) % h)), 0);
+}
+
+fn other_alive(x: i32, y: i32) -> bool {
+    return other(x, y).r > 0.5;
+}
 
 fn cell(x: i32, y: i32) -> vec4<f32> {
     let w = i32(globals.size.x);

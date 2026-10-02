@@ -128,7 +128,8 @@ const RESERVED_NAMES: &[&str] = &[
     "noise", "alive", "prev_alive", "neighbours", "neighbours4", "moore_sum", "laplacian", "on",
     "off", "on_if", "gray", "rgb", "hsv", "palette", "cell_at", "scene", "prev", "scene_px",
     "scene_tex", "scene_sampler", "prev_tex", "post", "neighbours_hex", "neighbours_tri",
-    "neighbours_tri12", "tri_is_up", "hex_cell", "hex_local", "hex_dist", "tri_cell",
+    "neighbours_tri12", "tri_is_up", "hex_cell", "hex_local", "hex_dist", "tri_cell", "other",
+    "other_alive", "other_tex",
     "rule", "shade", "main", "vs_main", "fs_main", "Globals", "Params", "VsOut", "_unused",
 ];
 
