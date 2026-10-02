@@ -35,7 +35,7 @@ const BUILTINS: &[&str] = &[
     "length", "normalize", "distance", "mix", "smoothstep", "step", "sign", "any", "all",
     "cell", "prev_cell", "hash", "rand", "wrap", "noise", "alive", "prev_alive", "neighbours",
     "neighbours4", "moore_sum", "laplacian", "on", "off", "on_if", "gray", "rgb", "hsv", "palette",
-    "cell_at",
+    "cell_at", "scene", "prev", "scene_px",
 ];
 
 fn is_ident_start(c: char) -> bool {

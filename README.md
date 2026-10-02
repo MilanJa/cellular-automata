@@ -67,6 +67,19 @@ to play with). Edit, press Ctrl+Enter, then **Save as…** when you like the res
 Compile errors show in the bottom panel with the line number in *your* source. Click an
 error to jump to it. The previous working shader keeps running until the new one compiles.
 
+## Post-processing
+
+A third editor, **Post (WGSL)**, runs on the finished picture at viewport resolution:
+
+    fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32>
+
+`color` is the pixel the render shader produced, `scene(uv)` samples the picture anywhere
+(linearly filtered), `prev(uv)` is the previous frame's post output for feedback and trails, and
+`scene_px()` is one pixel in uv units. It is collapsed and a pass-through until you change it.
+Exports go through it too. Neon Life uses it for bloom and trails; the *Post effects* template
+shows a CRT look (curvature, chromatic aberration, scanlines, vignette) with feedback. A preset
+stores it as `post.wgsl` next to the other two files.
+
 ## Parameters
 
 Declare live sliders in either shader with a comment:

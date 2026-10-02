@@ -5,7 +5,7 @@ use eframe::wgpu;
 use eframe::wgpu::util::DeviceExt;
 
 use crate::preset::{InitPattern, Mode};
-use crate::shader::assemble::Assembled;
+use crate::shader::assemble::{Assembled, BLIT_WGSL};
 use crate::shader::params::MAX_PARAMS;
 use crate::shader::validate::{validate, ShaderError, ShaderFile};
 use crate::sim::export::{
@@ -37,6 +37,23 @@ struct Textures {
     /// `[i]` reads `tex[i]` as current and `tex[1 - i]` as previous (statistics).
     stats_bind_groups: [wgpu::BindGroup; 2],
 }
+
+/// Rendered picture (`scene`) and the ping-pong post-processing outputs at viewport resolution.
+struct SceneTargets {
+    width: u32,
+    height: u32,
+    scene_view: wgpu::TextureView,
+    post_views: [wgpu::TextureView; 2],
+    /// `[k]` writes `post[k]` reading `scene` and `post[1 - k]` as the previous frame.
+    post_bind_groups: [wgpu::BindGroup; 2],
+    /// `[k]` blits `post[k]` to the window.
+    blit_bind_groups: [wgpu::BindGroup; 2],
+    /// Index of the post output holding the latest frame.
+    cur: usize,
+}
+
+/// Intermediate picture format: filterable, high range for bloom and feedback.
+pub const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// One slot of the statistics readback pool.
 struct StatsSlot {
@@ -77,6 +94,14 @@ pub struct Simulation {
     cur: usize,
     compute: Option<wgpu::ComputePipeline>,
     render: Option<wgpu::RenderPipeline>,
+    post: Option<wgpu::RenderPipeline>,
+    post_layout: wgpu::BindGroupLayout,
+    post_pipeline_layout: wgpu::PipelineLayout,
+    blit_layout: wgpu::BindGroupLayout,
+    blit_pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+    /// Viewport-resolution scene and post targets; created on first frame, resized on demand.
+    scene: Option<SceneTargets>,
     globals: Globals,
     /// Set by wgpu's device-lost callback; drained by the app once per frame.
     device_lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -246,6 +271,83 @@ impl Simulation {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ca post layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                uniform(2),
+                uniform(3),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ca post pipeline layout"),
+            bind_group_layouts: &[Some(&post_layout)],
+            immediate_size: 0,
+        });
+        let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ca blit layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ca blit"),
+            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
+        });
+        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ca blit pipeline layout"),
+            bind_group_layouts: &[Some(&blit_layout)],
+            immediate_size: 0,
+        });
+        let blit_pipeline = fullscreen_pipeline(&device, "ca blit", &blit_pipeline_layout, &blit_module, target_format);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ca scene sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let stats_slots = (0..3)
             .map(|i| StatsSlot {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
@@ -338,6 +440,13 @@ impl Simulation {
             cur: 0,
             compute: None,
             render: None,
+            post: None,
+            post_layout,
+            post_pipeline_layout,
+            blit_layout,
+            blit_pipeline,
+            sampler,
+            scene: None,
             globals,
             device_lost,
             export: None,
@@ -350,29 +459,44 @@ impl Simulation {
         self.export.is_some()
     }
 
-    /// Renders the current state at `scale` pixels per cell into an offscreen texture and starts
-    /// reading it back. The result arrives through `poll_export` on a later frame.
+    /// Renders the current state at `scale` pixels per cell through the render and post shaders
+    /// into an offscreen texture and starts reading it back. The result arrives through
+    /// `poll_export` on a later frame.
     pub fn start_export(&mut self, scale: u32, filename: String) -> Result<(), String> {
         if self.export.is_some() {
             return Err("an image export is already in progress".into());
         }
-        let Some(pipeline) = &self.render else {
+        let (Some(render), Some(post)) = (&self.render, &self.post) else {
             return Err("no render pipeline: fix the shaders first".into());
         };
         let max_dim = self.device.limits().max_texture_dimension_2d;
         let s = clamp_scale(scale, self.config.width, self.config.height, max_dim);
         let (width, height) = (self.config.width * s, self.config.height * s);
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("ca export target"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.target_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&Default::default());
+        let make = |label: &str, format: wgpu::TextureFormat, extra: wgpu::TextureUsages| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
+                view_formats: &[],
+            })
+        };
+        let scene_tex = make("ca export scene", SCENE_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING);
+        let post_tex = make("ca export post", SCENE_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING);
+        let final_tex = make("ca export final", self.target_format, wgpu::TextureUsages::COPY_SRC);
+        let scene_view = scene_tex.create_view(&Default::default());
+        let post_view = post_tex.create_view(&Default::default());
+        let final_view = final_tex.create_view(&Default::default());
+        // Feedback for the export reads the live post output when there is one, else the scene.
+        let prev_view = match &self.scene {
+            Some(sc) => sc.post_views[sc.cur].clone(),
+            None => scene_view.clone(),
+        };
+        let post_bg = self.post_bind_group(&scene_view, &prev_view);
+        let blit_bg = self.blit_bind_group(&post_view);
         let padded_bpr = padded_bytes_per_row(width * 4);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ca export readback"),
@@ -384,29 +508,26 @@ impl Simulation {
             label: Some("ca export"),
         });
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ca export pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(pipeline);
+            let mut pass = begin_pass(&mut encoder, "ca export render", &scene_view);
+            pass.set_pipeline(render);
             pass.set_bind_group(0, &self.textures.render_bind_groups[self.cur], &[]);
+            pass.draw(0..3, 0..1);
+        }
+        {
+            let mut pass = begin_pass(&mut encoder, "ca export post", &post_view);
+            pass.set_pipeline(post);
+            pass.set_bind_group(0, &post_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        {
+            let mut pass = begin_pass(&mut encoder, "ca export blit", &final_view);
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &blit_bg, &[]);
             pass.draw(0..3, 0..1);
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture: &final_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -475,7 +596,93 @@ impl Simulation {
     }
 
     pub fn has_pipelines(&self) -> bool {
-        self.compute.is_some() && self.render.is_some()
+        self.compute.is_some() && self.render.is_some() && self.post.is_some()
+    }
+
+    /// Makes sure the scene and post targets match the viewport's pixel size.
+    pub fn ensure_scene_size(&mut self, width: u32, height: u32) {
+        let (width, height) = (width.max(1), height.max(1));
+        if self.scene.as_ref().is_some_and(|s| s.width == width && s.height == height) {
+            return;
+        }
+        self.scene = Some(self.create_scene_targets(width, height));
+    }
+
+    fn create_scene_targets(&self, width: u32, height: u32) -> SceneTargets {
+        let make = |label: &str, extra: wgpu::TextureUsages| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SCENE_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | extra,
+                view_formats: &[],
+            })
+        };
+        let scene = make("ca scene", wgpu::TextureUsages::empty());
+        let post = [make("ca post A", wgpu::TextureUsages::COPY_SRC), make("ca post B", wgpu::TextureUsages::COPY_SRC)];
+        let scene_view = scene.create_view(&Default::default());
+        let post_views = [post[0].create_view(&Default::default()), post[1].create_view(&Default::default())];
+        let post_bg = |k: usize| self.post_bind_group(&scene_view, &post_views[1 - k]);
+        let blit_bg = |k: usize| self.blit_bind_group(&post_views[k]);
+        SceneTargets {
+            width,
+            height,
+            post_bind_groups: [post_bg(0), post_bg(1)],
+            blit_bind_groups: [blit_bg(0), blit_bg(1)],
+            scene_view,
+            post_views,
+            cur: 0,
+        }
+    }
+
+    fn post_bind_group(&self, scene: &wgpu::TextureView, prev: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ca post bg"),
+            layout: &self.post_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(scene) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: self.globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(prev) },
+            ],
+        })
+    }
+
+    fn blit_bind_group(&self, src: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ca blit bg"),
+            layout: &self.blit_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        })
+    }
+
+    /// Draws the state with the render shader into the scene texture, then runs the post shader
+    /// into the next post output. Call once per frame after stepping.
+    pub fn render_scene(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let (Some(render), Some(post), Some(scene)) = (&self.render, &self.post, &mut self.scene) else {
+            return;
+        };
+        {
+            let mut pass = begin_pass(encoder, "ca render scene", &scene.scene_view);
+            pass.set_pipeline(render);
+            pass.set_bind_group(0, &self.textures.render_bind_groups[self.cur], &[]);
+            pass.draw(0..3, 0..1);
+        }
+        let dst = 1 - scene.cur;
+        {
+            let mut pass = begin_pass(encoder, "ca post", &scene.post_views[dst]);
+            pass.set_pipeline(post);
+            pass.set_bind_group(0, &scene.post_bind_groups[dst], &[]);
+            pass.draw(0..3, 0..1);
+        }
+        scene.cur = dst;
     }
 
     /// Applies a new configuration (clamped to device limits), recreating textures if the size
@@ -627,63 +834,41 @@ impl Simulation {
         Ok(pipeline)
     }
 
-    fn build_render(&self, assembled: &Assembled) -> Result<wgpu::RenderPipeline, Vec<ShaderError>> {
-        let file = ShaderFile::Render;
+    fn build_fullscreen(
+        &self,
+        file: ShaderFile,
+        assembled: &Assembled,
+        layout: &wgpu::PipelineLayout,
+        format: wgpu::TextureFormat,
+    ) -> Result<wgpu::RenderPipeline, Vec<ShaderError>> {
         let module = self.create_module(file, assembled)?;
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ca render"),
-            layout: Some(&self.render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.target_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = fullscreen_pipeline(&self.device, file.label(), layout, &module, format);
         Self::backend_error(file, pop_scope(scope))?;
         Ok(pipeline)
     }
 
-    /// Builds both pipelines and swaps them in together. On any error nothing changes, so the
-    /// live pipelines always agree on the `Params` layout. Errors from both shaders are returned.
+    /// Builds the compute, render and post pipelines and swaps them in together. On any error
+    /// nothing changes, so the live pipelines always agree on the `Params` layout.
     pub fn set_pipelines(
         &mut self,
         rule: &Assembled,
         render: &Assembled,
+        post: &Assembled,
     ) -> Result<(), Vec<ShaderError>> {
         let compute = self.build_compute(rule);
-        let render = self.build_render(render);
-        match (compute, render) {
-            (Ok(c), Ok(r)) => {
+        let render = self.build_fullscreen(ShaderFile::Render, render, &self.render_pipeline_layout, SCENE_FORMAT);
+        let post = self.build_fullscreen(ShaderFile::Post, post, &self.post_pipeline_layout, SCENE_FORMAT);
+        match (compute, render, post) {
+            (Ok(c), Ok(r), Ok(p)) => {
                 self.compute = Some(c);
                 self.render = Some(r);
+                self.post = Some(p);
                 Ok(())
             }
-            (c, r) => {
+            (c, r, p) => {
                 let mut errors = Vec::new();
-                if let Err(e) = c {
-                    errors.extend(e);
-                }
-                if let Err(e) = r {
+                for e in [c.err(), r.err(), p.err()].into_iter().flatten() {
                     errors.extend(e);
                 }
                 Err(errors)
@@ -866,13 +1051,71 @@ impl Simulation {
         self.cur = cur;
     }
 
-    /// Draws the current state with the render pipeline into the active render pass.
+    /// Copies the latest post output into the active render pass (the viewport).
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'static>) {
-        let Some(pipeline) = &self.render else { return };
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &self.textures.render_bind_groups[self.cur], &[]);
+        let Some(scene) = &self.scene else { return };
+        if self.post.is_none() {
+            return;
+        }
+        pass.set_pipeline(&self.blit_pipeline);
+        pass.set_bind_group(0, &scene.blit_bind_groups[scene.cur], &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+fn begin_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    label: &str,
+    view: &wgpu::TextureView,
+) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
+}
+
+/// A fullscreen-triangle pipeline (`vs_main` / `fs_main`) writing opaque colour to `format`.
+fn fullscreen_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Resolves a validation error scope. In the browser the result is a promise that cannot be
@@ -1031,7 +1274,7 @@ fn create_textures(
 mod gpu_tests {
     use super::*;
     use crate::preset::builtin::{load_builtin, BUILTINS};
-    use crate::shader::assemble::{assemble_render, assemble_rule};
+    use crate::shader::assemble::{assemble_post, assemble_render, assemble_rule, DEFAULT_POST};
     use crate::shader::params::{merge_params, pack_params, params_wgsl, parse_params};
 
     /// Creating several devices concurrently from test threads hangs on some drivers, so every
@@ -1058,10 +1301,10 @@ mod gpu_tests {
         SimConfig { mode, width: w, height: h, init: InitPattern::Single, seed: 1 }
     }
 
-    fn assembled_for(rule: &str, render: &str) -> (Assembled, Assembled) {
+    fn assembled_for(rule: &str, render: &str) -> (Assembled, Assembled, Assembled) {
         let specs = merge_params(parse_params(rule).unwrap(), parse_params(render).unwrap()).unwrap();
         let pw = params_wgsl(&specs);
-        (assemble_rule(rule, &pw), assemble_render(render, &pw))
+        (assemble_rule(rule, &pw), assemble_render(render, &pw), assemble_post(DEFAULT_POST, &pw))
     }
 
     /// Uploads the shaders' default param values, as the app does after a successful apply.
@@ -1086,9 +1329,9 @@ mod gpu_tests {
         let _gpu = gpu_lock();
         for b in BUILTINS {
             let p = load_builtin(b);
-            let (rule, render) = assembled_for(&p.rule, &p.render);
+            let (rule, render, post) = assembled_for(&p.rule, &p.render);
             let Some(mut sim) = sim_with(config(p.meta.mode, 64, 32)) else { return };
-            sim.set_pipelines(&rule, &render).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+            sim.set_pipelines(&rule, &render, &post).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
             upload_default_params(&mut sim, &p.rule, &p.render);
             assert!(sim.has_pipelines());
             assert!(step_and_check(&mut sim, 40).is_none(), "{}: validation error while stepping", b.id);
@@ -1101,14 +1344,14 @@ mod gpu_tests {
     fn bad_shader_is_rejected_and_both_old_pipelines_stay() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[2]);
-        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
         let Some(mut sim) = sim_with(config(Mode::TwoD, 32, 32)) else { return };
-        sim.set_pipelines(&rule, &render).unwrap();
-        let (bad_rule, _) = assembled_for("fn rule(pos: vec2<u32>) -> vec4<f32> { return bogus(; }", &p.render);
-        let errs = sim.set_pipelines(&bad_rule, &render).unwrap_err();
+        sim.set_pipelines(&rule, &render, &post).unwrap();
+        let (bad_rule, _, _) = assembled_for("fn rule(pos: vec2<u32>) -> vec4<f32> { return bogus(; }", &p.render);
+        let errs = sim.set_pipelines(&bad_rule, &render, &post).unwrap_err();
         assert_eq!((errs[0].file, errs[0].line), (ShaderFile::Rule, 1));
-        let (_, bad_render) = assembled_for(&p.rule, "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return 1.0; }");
-        let errs = sim.set_pipelines(&rule, &bad_render).unwrap_err();
+        let (_, bad_render, _) = assembled_for(&p.rule, "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return 1.0; }");
+        let errs = sim.set_pipelines(&rule, &bad_render, &post).unwrap_err();
         assert_eq!(errs[0].file, ShaderFile::Render);
         assert!(sim.has_pipelines(), "a failed build must not remove the live pipelines");
         assert!(step_and_check(&mut sim, 3).is_none());
@@ -1144,9 +1387,9 @@ mod gpu_tests {
     fn reset_leaves_no_stale_rows_in_the_second_texture() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[0]);
-        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
         let Some(mut sim) = sim_with(config(Mode::OneD, 16, 4)) else { return };
-        sim.set_pipelines(&rule, &render).unwrap();
+        sim.set_pipelines(&rule, &render, &post).unwrap();
         upload_default_params(&mut sim, &p.rule, &p.render);
         assert!(step_and_check(&mut sim, 3).is_none());
         // Sanity: rule 30 from a single cell must have produced live cells in the other texture.
@@ -1164,10 +1407,10 @@ mod gpu_tests {
     fn one_d_steps_past_the_bottom_and_with_height_one_without_validation_errors() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[0]);
-        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
         for h in [1u32, 2, 5] {
             let Some(mut sim) = sim_with(config(Mode::OneD, 16, h)) else { return };
-            sim.set_pipelines(&rule, &render).unwrap();
+            sim.set_pipelines(&rule, &render, &post).unwrap();
             assert!(step_and_check(&mut sim, h + 7).is_none(), "height {h}: validation error");
         }
     }
@@ -1177,7 +1420,7 @@ mod gpu_tests {
     fn lifelike_template_runs_and_keeps_live_cells() {
         let _gpu = gpu_lock();
         let t = load_builtin(&crate::preset::builtin::TEMPLATES[1]);
-        let (rule, render) = assembled_for(&t.rule, &t.render);
+        let (rule, render, post) = assembled_for(&t.rule, &t.render);
         let Some(mut sim) = sim_with(SimConfig {
             mode: Mode::TwoD,
             width: 64,
@@ -1187,7 +1430,7 @@ mod gpu_tests {
         }) else {
             return;
         };
-        sim.set_pipelines(&rule, &render).unwrap();
+        sim.set_pipelines(&rule, &render, &post).unwrap();
         upload_default_params(&mut sim, &t.rule, &t.render);
         assert!(step_and_check(&mut sim, 10).is_none());
         let live = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
@@ -1199,7 +1442,7 @@ mod gpu_tests {
     fn export_produces_a_decodable_png_with_live_pixels() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[2]);
-        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
         let Some(mut sim) = sim_with(SimConfig {
             mode: Mode::TwoD,
             width: 16,
@@ -1209,7 +1452,7 @@ mod gpu_tests {
         }) else {
             return;
         };
-        sim.set_pipelines(&rule, &render).unwrap();
+        sim.set_pipelines(&rule, &render, &post).unwrap();
         upload_default_params(&mut sim, &p.rule, &p.render);
         assert!(step_and_check(&mut sim, 2).is_none());
         sim.start_export(2, "life.png".into()).unwrap();
@@ -1356,9 +1599,9 @@ mod gpu_tests {
     fn time_reaches_the_gpu_while_paused_and_frame_counts_match_after_steps() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[2]);
-        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
         let Some(mut sim) = sim_with(config(Mode::TwoD, 16, 16)) else { return };
-        sim.set_pipelines(&rule, &render).unwrap();
+        sim.set_pipelines(&rule, &render, &post).unwrap();
         sim.set_time(5.5);
         assert!(step_and_check(&mut sim, 0).is_none());
         assert_eq!(read_globals(&sim).time, 5.5, "paused: time must still be uploaded");

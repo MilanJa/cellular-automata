@@ -7,6 +7,7 @@ use super::hints::hint_for;
 pub enum ShaderFile {
     Rule,
     Render,
+    Post,
 }
 
 impl ShaderFile {
@@ -14,6 +15,7 @@ impl ShaderFile {
         match self {
             ShaderFile::Rule => "rule.wgsl",
             ShaderFile::Render => "render.wgsl",
+            ShaderFile::Post => "post.wgsl",
         }
     }
 }
@@ -195,5 +197,17 @@ mod tests {
         let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
         let hint = errs[0].hint.as_deref().expect("hint for numeric type mix");
         assert!(hint.contains("f32("), "{hint}");
+    }
+
+    #[test]
+    fn post_shader_validates_and_reports_its_own_file() {
+        use crate::shader::assemble::{assemble_post, DEFAULT_POST};
+        assert!(validate(ShaderFile::Post, &assemble_post(DEFAULT_POST, &params_wgsl(&[]))).is_ok());
+        let bloom = "fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {\n    let px = 1.0 / vec2<f32>(globals.size);\n    var acc = vec4<f32>(0.0);\n    for (var i = -2; i <= 2; i++) { acc += scene(uv + vec2<f32>(f32(i), 0.0) * px * 2.0); }\n    return color + acc * 0.1 + prev(uv) * 0.3;\n}\n";
+        assert!(validate(ShaderFile::Post, &assemble_post(bloom, &params_wgsl(&[]))).is_ok());
+        let bad = "fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {\n    return oops(;\n}\n";
+        let errs = validate(ShaderFile::Post, &assemble_post(bad, &params_wgsl(&[]))).unwrap_err();
+        assert_eq!((errs[0].file, errs[0].line), (ShaderFile::Post, 2));
+        assert_eq!(ShaderFile::Post.label(), "post.wgsl");
     }
 }

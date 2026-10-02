@@ -13,9 +13,9 @@ pub fn hint_for(message: &str, line_text: &str) -> Option<String> {
     {
         "WGSL never converts numbers implicitly: an integer and a float, or i32 and u32, cannot be mixed. Convert explicitly, e.g. `f32(pos.x)`, `i32(n)` or `u32(k)`, and give integer literals a suffix (`1u`)."
     } else if m.contains("no definition in scope for identifier") {
-        "Check the spelling. Rule helpers: cell, alive, neighbours, neighbours4, laplacian, moore_sum, prev_cell, prev_alive, noise, on, off, on_if. Render helpers: gray, rgb, hsv, palette, cell_at. Sliders are read as `params.<name>`."
+        "Check the spelling. Rule helpers: cell, alive, neighbours, neighbours4, laplacian, moore_sum, prev_cell, prev_alive, noise, on, off, on_if. Render helpers: gray, rgb, hsv, palette, cell_at. Post helpers: scene, prev, scene_px. Sliders are read as `params.<name>`."
     } else if m.contains("does not match the declared return type") {
-        "Every path through `rule` and `shade` must end with `return vec4<f32>(...)` (or a helper such as `on_if(...)` / `gray(...)`)."
+        "Every path through `rule`, `shade` and `post` must end with `return vec4<f32>(...)` (or a helper such as `on_if(...)` / `gray(...)`)."
     } else if m.starts_with("expected") && m.contains("found \"=\"") {
         "Comparison is `==`; a single `=` assigns."
     } else if m.starts_with("expected `;`") {

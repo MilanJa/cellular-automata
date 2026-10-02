@@ -145,7 +145,7 @@ impl App {
             }
         };
         let mut sim = self.sim.lock().unwrap();
-        if let Err(errors) = sim.set_pipelines(&loaded.rule, &loaded.render) {
+        if let Err(errors) = sim.set_pipelines(&loaded.rule, &loaded.render, &loaded.post) {
             drop(sim);
             self.state.errors = diagnostics_from(errors);
             return;
@@ -190,8 +190,8 @@ impl App {
     fn apply_shaders_with_toml(&mut self, toml_params: &BTreeMap<String, toml::Value>) {
         match build_shaders(&self.state.editor) {
             Err(errors) => self.state.errors = diagnostics_from(errors),
-            Ok((specs, rule, render)) => {
-                let result = self.sim.lock().unwrap().set_pipelines(&rule, &render);
+            Ok((specs, rule, render, post)) => {
+                let result = self.sim.lock().unwrap().set_pipelines(&rule, &render, &post);
                 match result {
                     Err(errors) => self.state.errors = diagnostics_from(errors),
                     Ok(()) => {

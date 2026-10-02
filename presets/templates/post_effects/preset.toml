@@ -1,0 +1,12 @@
+name = "Post effects (CRT and feedback)"
+mode = "2d"
+width = 160
+height = 120
+steps_per_frame = 1
+seed = 9
+
+[init]
+kind = "random"
+density = 0.3
+
+[params]

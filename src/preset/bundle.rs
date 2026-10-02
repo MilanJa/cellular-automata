@@ -10,16 +10,23 @@ struct Bundle {
     meta: PresetMeta,
     rule: String,
     render: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    post: Option<String>,
 }
 
 pub fn to_bundle(preset: &Preset) -> anyhow::Result<String> {
-    let b = Bundle { meta: preset.meta.clone(), rule: preset.rule.clone(), render: preset.render.clone() };
+    let b = Bundle {
+        meta: preset.meta.clone(),
+        rule: preset.rule.clone(),
+        render: preset.render.clone(),
+        post: preset.post.clone(),
+    };
     Ok(toml::to_string(&b)?)
 }
 
 pub fn from_bundle(text: &str) -> anyhow::Result<Preset> {
     let b: Bundle = toml::from_str(text)?;
-    Ok(Preset { meta: b.meta, rule: b.rule, render: b.render })
+    Ok(Preset { meta: b.meta, rule: b.rule, render: b.render, post: b.post })
 }
 
 pub const BUNDLE_SUFFIX: &str = ".capreset.toml";
@@ -53,5 +60,14 @@ mod tests {
     #[test]
     fn bundle_filename_is_slug_based() {
         assert_eq!(bundle_filename("Game of Life"), "game_of_life.capreset.toml");
+    }
+
+    #[test]
+    fn bundle_carries_the_optional_post_shader() {
+        let mut p = load_builtin(&BUILTINS[2]);
+        assert_eq!(from_bundle(&to_bundle(&p).unwrap()).unwrap().post, None);
+        p.post = Some("fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> { return color; }\n".into());
+        let back = from_bundle(&to_bundle(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
     }
 }

@@ -14,7 +14,9 @@ fn char_index_of_line(text: &str, line: usize) -> usize {
 fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
     let dirty = app.state.editor.is_dirty(file);
     let header = format!("{title}{}", if dirty { " *" } else { "" });
-    egui::CollapsingHeader::new(header).default_open(true).show(ui, |ui| {
+    // The post editor starts collapsed while it is still the pass-through default.
+    let open = file != ShaderFile::Post || app.state.editor.post_for_preset().is_some();
+    egui::CollapsingHeader::new(header).default_open(open).show(ui, |ui| {
         ui.horizontal(|ui| {
             if ui.button("Apply (Ctrl+Enter)").clicked() {
                 app.apply_shaders();
@@ -30,6 +32,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
             let text = match file {
                 ShaderFile::Rule => &app.state.editor.rule,
                 ShaderFile::Render => &app.state.editor.render,
+                ShaderFile::Post => &app.state.editor.post,
             };
             let idx = char_index_of_line(text, line);
             let mut st =
@@ -41,6 +44,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
         let text = match file {
             ShaderFile::Rule => &mut app.state.editor.rule,
             ShaderFile::Render => &mut app.state.editor.render,
+            ShaderFile::Post => &mut app.state.editor.post,
         };
         let mut lay = layouter();
         let out = egui::TextEdit::multiline(text)
@@ -62,6 +66,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     one_editor(app, ui, ShaderFile::Rule, "Rule (WGSL)");
     one_editor(app, ui, ShaderFile::Render, "Render (WGSL)");
+    one_editor(app, ui, ShaderFile::Post, "Post (WGSL)");
 }
 
 #[cfg(test)]

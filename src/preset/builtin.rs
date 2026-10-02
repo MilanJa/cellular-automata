@@ -7,6 +7,7 @@ pub struct Builtin {
     pub meta_toml: &'static str,
     pub rule: &'static str,
     pub render: &'static str,
+    pub post: Option<&'static str>,
 }
 
 macro_rules! embedded {
@@ -16,6 +17,16 @@ macro_rules! embedded {
             meta_toml: include_str!(concat!("../../presets/", $dir, "/preset.toml")),
             rule: include_str!(concat!("../../presets/", $dir, "/rule.wgsl")),
             render: include_str!(concat!("../../presets/", $dir, "/render.wgsl")),
+            post: None,
+        }
+    };
+    ($id:literal, $dir:literal, post) => {
+        Builtin {
+            id: $id,
+            meta_toml: include_str!(concat!("../../presets/", $dir, "/preset.toml")),
+            rule: include_str!(concat!("../../presets/", $dir, "/rule.wgsl")),
+            render: include_str!(concat!("../../presets/", $dir, "/render.wgsl")),
+            post: Some(include_str!(concat!("../../presets/", $dir, "/post.wgsl"))),
         }
     };
 }
@@ -27,7 +38,7 @@ pub const BUILTINS: &[Builtin] = &[
     embedded!("life", "life"),
     embedded!("lifelike", "lifelike"),
     embedded!("gray_scott", "gray_scott"),
-    embedded!("neon_life", "neon_life"),
+    embedded!("neon_life", "neon_life", post),
 ];
 
 /// Commented starting points for new work, offered by the "New" menu.
@@ -37,19 +48,20 @@ pub const TEMPLATES: &[Builtin] = &[
     embedded!("elementary1d", "templates/elementary1d"),
     embedded!("continuous2d", "templates/continuous2d"),
     embedded!("render_only", "templates/render_only"),
-    embedded!("neon_life", "neon_life"),
+    embedded!("neon_life", "neon_life", post),
+    embedded!("post_effects", "templates/post_effects", post),
 ];
 
 pub fn load_builtin(b: &Builtin) -> Preset {
     let meta: PresetMeta = toml::from_str(b.meta_toml)
         .unwrap_or_else(|e| panic!("embedded preset {} has invalid preset.toml: {e}", b.id));
-    Preset { meta, rule: b.rule.to_string(), render: b.render.to_string() }
+    Preset { meta, rule: b.rule.to_string(), render: b.render.to_string(), post: b.post.map(str::to_string) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shader::assemble::{assemble_render, assemble_rule};
+    use crate::shader::assemble::{assemble_post, assemble_render, assemble_rule, DEFAULT_POST};
     use crate::shader::params::{merge_params, params_wgsl, parse_params};
     use crate::shader::validate::{validate, ShaderFile};
 
@@ -60,16 +72,24 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{what} {}: rule params: {:?}", b.id, e));
             let render_params = parse_params(&preset.render)
                 .unwrap_or_else(|e| panic!("{what} {}: render params: {:?}", b.id, e));
+            let post_src = preset.post.clone().unwrap_or_else(|| DEFAULT_POST.to_string());
+            let post_params = parse_params(&post_src)
+                .unwrap_or_else(|e| panic!("{what} {}: post params: {:?}", b.id, e));
             let specs = merge_params(rule_params, render_params)
+                .and_then(|s| merge_params(s, post_params))
                 .unwrap_or_else(|e| panic!("{what} {}: merge: {:?}", b.id, e));
             let pw = params_wgsl(&specs);
             let rule = assemble_rule(&preset.rule, &pw);
             let render = assemble_render(&preset.render, &pw);
+            let post = assemble_post(&post_src, &pw);
             if let Err(e) = validate(ShaderFile::Rule, &rule) {
                 panic!("{what} {}: rule: {:?}\n{}", b.id, e, rule.source);
             }
             if let Err(e) = validate(ShaderFile::Render, &render) {
                 panic!("{what} {}: render: {:?}\n{}", b.id, e, render.source);
+            }
+            if let Err(e) = validate(ShaderFile::Post, &post) {
+                panic!("{what} {}: post: {:?}\n{}", b.id, e, post.source);
             }
             assert!(preset.meta.width > 0 && preset.meta.height > 0);
         }
@@ -86,11 +106,11 @@ mod tests {
 
     #[test]
     fn templates_have_unique_ids() {
-        assert_eq!(TEMPLATES.len(), 6);
+        assert_eq!(TEMPLATES.len(), 7);
         let mut ids: Vec<_> = TEMPLATES.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 6);
+        assert_eq!(ids.len(), 7);
     }
 
     #[test]

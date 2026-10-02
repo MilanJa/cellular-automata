@@ -126,7 +126,8 @@ const RESERVED_NAMES: &[&str] = &[
     "array", "atomic", "ptr", "sampler", "texture_2d", "texture_storage_2d",
     "params", "globals", "src", "dst", "state", "cell", "prev_cell", "hash", "rand", "wrap",
     "noise", "alive", "prev_alive", "neighbours", "neighbours4", "moore_sum", "laplacian", "on",
-    "off", "on_if", "gray", "rgb", "hsv", "palette", "cell_at",
+    "off", "on_if", "gray", "rgb", "hsv", "palette", "cell_at", "scene", "prev", "scene_px",
+    "scene_tex", "scene_sampler", "prev_tex", "post",
     "rule", "shade", "main", "vs_main", "fs_main", "Globals", "Params", "VsOut", "_unused",
 ];
 

@@ -51,6 +51,8 @@ pub struct Preset {
     pub meta: PresetMeta,
     pub rule: String,
     pub render: String,
+    /// Optional post-processing shader (`post.wgsl`); `None` means pass-through.
+    pub post: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -63,7 +65,8 @@ impl Preset {
         let rule = std::fs::read_to_string(dir.join("rule.wgsl")).context("reading rule.wgsl")?;
         let render =
             std::fs::read_to_string(dir.join("render.wgsl")).context("reading render.wgsl")?;
-        Ok(Preset { meta, rule, render })
+        let post = std::fs::read_to_string(dir.join("post.wgsl")).ok();
+        Ok(Preset { meta, rule, render, post })
     }
 
     pub fn save_dir(&self, dir: &Path) -> anyhow::Result<()> {
@@ -72,6 +75,12 @@ impl Preset {
         std::fs::write(dir.join("preset.toml"), meta_text)?;
         std::fs::write(dir.join("rule.wgsl"), &self.rule)?;
         std::fs::write(dir.join("render.wgsl"), &self.render)?;
+        match &self.post {
+            Some(post) => std::fs::write(dir.join("post.wgsl"), post)?,
+            None => {
+                let _ = std::fs::remove_file(dir.join("post.wgsl"));
+            }
+        }
         Ok(())
     }
 }
@@ -197,6 +206,7 @@ mod tests {
             },
             rule: "fn rule() {}\n".into(),
             render: "fn shade() {}\n".into(),
+            post: None,
         }
     }
 
@@ -353,5 +363,18 @@ mod tests {
         assert_eq!(back, p.meta);
         let plain: PresetMeta = toml::from_str(&toml::to_string(&sample().meta).unwrap()).unwrap();
         assert!(plain.modulation.is_empty());
+    }
+
+    #[test]
+    fn optional_post_shader_is_saved_and_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = sample();
+        p.save_dir(dir.path()).unwrap();
+        assert!(!dir.path().join("post.wgsl").exists(), "no post file when there is no post shader");
+        assert_eq!(Preset::load_dir(dir.path()).unwrap().post, None);
+        p.post = Some("fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> { return color * 2.0; }\n".into());
+        p.save_dir(dir.path()).unwrap();
+        assert!(dir.path().join("post.wgsl").exists());
+        assert_eq!(Preset::load_dir(dir.path()).unwrap(), p);
     }
 }

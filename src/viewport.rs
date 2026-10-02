@@ -29,6 +29,8 @@ pub struct ViewportCallback {
     pub grid_aspect: f32,
     /// Brush strokes to apply before this frame's steps.
     pub strokes: Vec<Stroke>,
+    /// Size in physical pixels of the letterboxed grid area (the scene resolution).
+    pub scene_pixels: (u32, u32),
 }
 
 impl CallbackTrait for ViewportCallback {
@@ -49,6 +51,8 @@ impl CallbackTrait for ViewportCallback {
         if self.steps > 0 || !self.strokes.is_empty() {
             sim.collect_stats(egui_encoder);
         }
+        sim.ensure_scene_size(self.scene_pixels.0, self.scene_pixels.1);
+        sim.render_scene(egui_encoder);
         Vec::new()
     }
 
@@ -86,7 +90,10 @@ pub fn show_viewport(
         let c = s.config();
         c.width as f32 / c.height.max(1) as f32
     };
-    let cb = ViewportCallback { sim: sim.clone(), steps, time, grid_aspect, strokes };
+    let ppp = ui.ctx().pixels_per_point();
+    let (_, _, lw, lh) = letterbox(rect.width() * ppp, rect.height() * ppp, grid_aspect);
+    let scene_pixels = ((lw.round() as u32).max(1), (lh.round() as u32).max(1));
+    let cb = ViewportCallback { sim: sim.clone(), steps, time, grid_aspect, strokes, scene_pixels };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, cb));
     (rect, response)
 }

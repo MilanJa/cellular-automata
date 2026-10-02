@@ -7,7 +7,7 @@ use crate::app::modulation::Modulation;
 use crate::platform::SavedLocation;
 
 use crate::preset::{param_value_from_toml, param_value_to_toml, InitPattern, Preset, PresetMeta};
-use crate::shader::assemble::{assemble_render, assemble_rule, Assembled};
+use crate::shader::assemble::{assemble_post, assemble_render, assemble_rule, Assembled, DEFAULT_POST};
 use crate::shader::params::{
     merge_params, params_wgsl, parse_params, ParamError, ParamSpec, ParamValue,
 };
@@ -31,10 +31,13 @@ pub enum PresetSource {
 pub struct EditorState {
     pub rule: String,
     pub render: String,
+    /// Post-processing shader text; `DEFAULT_POST` when the preset has none.
+    pub post: String,
     /// True when the rule editor changed since the last successful apply.
     pub rule_dirty: bool,
     /// True when the render editor changed since the last successful apply.
     pub render_dirty: bool,
+    pub post_dirty: bool,
 }
 
 impl EditorState {
@@ -42,6 +45,7 @@ impl EditorState {
         match file {
             ShaderFile::Rule => self.rule_dirty = true,
             ShaderFile::Render => self.render_dirty = true,
+            ShaderFile::Post => self.post_dirty = true,
         }
     }
 
@@ -49,16 +53,23 @@ impl EditorState {
         match file {
             ShaderFile::Rule => self.rule_dirty,
             ShaderFile::Render => self.render_dirty,
+            ShaderFile::Post => self.post_dirty,
         }
     }
 
     pub fn any_dirty(&self) -> bool {
-        self.rule_dirty || self.render_dirty
+        self.rule_dirty || self.render_dirty || self.post_dirty
     }
 
     pub fn clear_dirty(&mut self) {
         self.rule_dirty = false;
         self.render_dirty = false;
+        self.post_dirty = false;
+    }
+
+    /// The post text to store in a preset: `None` when it is the untouched pass-through.
+    pub fn post_for_preset(&self) -> Option<String> {
+        if self.post.trim() == DEFAULT_POST.trim() { None } else { Some(self.post.clone()) }
     }
 }
 
@@ -206,20 +217,24 @@ fn param_err(file: ShaderFile, e: ParamError) -> ShaderError {
     ShaderError { file, line: e.line.max(1), column: 1, message: e.message, hint: None }
 }
 
-/// Parses params from both editors, merges them, assembles and validates both shaders.
-/// Returns every error found (rule errors first) or the specs plus both assembled sources.
+/// Parses params from all three editors, merges them, assembles and validates the shaders.
+/// Returns every error found (rule, render, post order) or the specs plus the assembled sources.
 pub fn build_shaders(
     editor: &EditorState,
-) -> Result<(Vec<ParamSpec>, Assembled, Assembled), Vec<ShaderError>> {
+) -> Result<(Vec<ParamSpec>, Assembled, Assembled, Assembled), Vec<ShaderError>> {
     let rule_params =
         parse_params(&editor.rule).map_err(|e| vec![param_err(ShaderFile::Rule, e)])?;
     let render_params =
         parse_params(&editor.render).map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
+    let post_params =
+        parse_params(&editor.post).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
     let specs = merge_params(rule_params, render_params)
         .map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
+    let specs = merge_params(specs, post_params).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
     let pw = params_wgsl(&specs);
     let rule = assemble_rule(&editor.rule, &pw);
     let render = assemble_render(&editor.render, &pw);
+    let post = assemble_post(&editor.post, &pw);
     let mut errors = Vec::new();
     if let Err(e) = validate(ShaderFile::Rule, &rule) {
         errors.extend(e);
@@ -227,7 +242,10 @@ pub fn build_shaders(
     if let Err(e) = validate(ShaderFile::Render, &render) {
         errors.extend(e);
     }
-    if errors.is_empty() { Ok((specs, rule, render)) } else { Err(errors) }
+    if let Err(e) = validate(ShaderFile::Post, &post) {
+        errors.extend(e);
+    }
+    if errors.is_empty() { Ok((specs, rule, render, post)) } else { Err(errors) }
 }
 
 /// Splits a preset into editor text, grid config, steps-per-frame and its raw TOML param values.
@@ -239,6 +257,7 @@ pub fn preset_to_state(
     let editor = EditorState {
         rule: preset.rule.clone(),
         render: preset.render.clone(),
+        post: preset.post.clone().unwrap_or_else(|| DEFAULT_POST.to_string()),
         ..Default::default()
     };
     let init = match &m.init {
@@ -266,6 +285,7 @@ pub struct LoadedPreset {
     pub specs: Vec<ParamSpec>,
     pub rule: Assembled,
     pub render: Assembled,
+    pub post: Assembled,
     pub toml_params: BTreeMap<String, toml::Value>,
     pub modulations: BTreeMap<String, Modulation>,
     pub name: String,
@@ -275,7 +295,7 @@ pub struct LoadedPreset {
 /// preset with a broken shader leaves the current session untouched.
 pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderError>> {
     let (editor, config, steps_per_frame, toml_params) = preset_to_state(preset);
-    let (specs, rule, render) = build_shaders(&editor)?;
+    let (specs, rule, render, post) = build_shaders(&editor)?;
     Ok(LoadedPreset {
         editor,
         config,
@@ -283,6 +303,7 @@ pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderEr
         specs,
         rule,
         render,
+        post,
         toml_params,
         modulations: preset.meta.modulation.clone(),
         name: preset.meta.name.clone(),
@@ -315,6 +336,7 @@ pub fn state_to_preset(state: &AppState) -> Preset {
         },
         rule: state.editor.rule.clone(),
         render: state.editor.render.clone(),
+        post: state.editor.post_for_preset(),
     }
 }
 
@@ -401,7 +423,7 @@ mod tests {
     fn preset_round_trips_through_state() {
         let p = load_builtin(&BUILTINS[2]);
         let (editor, config, spf, toml_params) = preset_to_state(&p);
-        let (specs, _, _) = build_shaders(&editor).unwrap();
+        let (specs, _, _, _) = build_shaders(&editor).unwrap();
         let values = resolve_values(&specs, &toml_params, &BTreeMap::new());
         let state = AppState::from_parts(
             editor,
@@ -491,5 +513,28 @@ mod tests {
         assert_eq!(r, 0.0);
         let r = m.update(t0 + Duration::from_millis(1800), 55);
         assert!((r - 100.0).abs() < 1e-3, "rate {r}");
+    }
+
+    #[test]
+    fn build_shaders_merges_params_from_all_three_editors_and_validates_post() {
+        let mut editor = preset_to_state(&load_builtin(&BUILTINS[2])).0;
+        editor.post = "// @param strength: f32 = 0.5 range 0.0 .. 1.0\nfn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> { return color * params.strength; }\n".into();
+        let (specs, _, _, post) = build_shaders(&editor).unwrap();
+        assert!(specs.iter().any(|s| s.name == "strength"));
+        assert!(specs.iter().any(|s| s.name == "fade"));
+        assert!(post.source.contains("params.strength"));
+        editor.post = "fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> { return 1.0; }\n".into();
+        let errs = build_shaders(&editor).unwrap_err();
+        assert!(errs.iter().any(|e| e.file == ShaderFile::Post));
+    }
+
+    #[test]
+    fn editor_dirty_flags_cover_the_post_editor() {
+        let mut e = EditorState::default();
+        e.mark_dirty(ShaderFile::Post);
+        assert!(e.is_dirty(ShaderFile::Post));
+        assert!(!e.is_dirty(ShaderFile::Rule));
+        e.clear_dirty();
+        assert!(!e.any_dirty());
     }
 }

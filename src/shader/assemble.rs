@@ -194,6 +194,76 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// The post shader every preset starts with: no change to the picture.
+pub const DEFAULT_POST: &str = "// Post-processing: `color` is this pixel, scene(uv) samples the picture, prev(uv) is the\n// previous frame's output (feedback), scene_px() is one pixel in uv units.\nfn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> {\n    return color;\n}\n";
+
+const POST_PRELUDE: &str = r#"@group(0) @binding(0) var scene_tex: texture_2d<f32>;
+@group(0) @binding(1) var scene_sampler: sampler;
+@group(0) @binding(2) var<uniform> globals: Globals;
+@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var prev_tex: texture_2d<f32>;
+
+// The rendered picture at `uv` (0..1), linearly filtered, clamped at the edges.
+fn scene(uv: vec2<f32>) -> vec4<f32> {
+    return textureSample(scene_tex, scene_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+}
+
+// Last frame's post output at `uv`: feedback for trails and smearing.
+fn prev(uv: vec2<f32>) -> vec4<f32> {
+    return textureSample(prev_tex, scene_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+}
+
+// Size of one picture pixel in uv units.
+fn scene_px() -> vec2<f32> {
+    return vec2<f32>(1.0) / vec2<f32>(textureDimensions(scene_tex));
+}
+
+// ---- user post ----
+"#;
+
+const POST_EPILOGUE: &str = r#"
+// ---- entry ----
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(vi & 1u) * 4 - 1);
+    let y = f32(i32(vi >> 1u) * 4 - 1);
+    out.pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(scene_tex, scene_sampler, in.uv);
+    return post(in.uv, c);
+}
+"#;
+
+/// Fixed shader that copies the post output to the window.
+pub const BLIT_WGSL: &str = r#"@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var src_sampler: sampler;
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(vi & 1u) * 4 - 1);
+    let y = f32(i32(vi >> 1u) * 4 - 1);
+    out.pos = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
+    return out;
+}
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(textureSample(src_tex, src_sampler, in.uv).rgb, 1.0);
+}
+"#;
+
 fn assemble(prelude: &str, user: &str, params_struct: &str, epilogue: &str) -> Assembled {
     let head = format!("{GLOBALS_WGSL}{params_struct}{prelude}");
     let user_line_offset = head.lines().count();
@@ -208,6 +278,10 @@ pub fn assemble_rule(user: &str, params_struct: &str) -> Assembled {
 
 pub fn assemble_render(user: &str, params_struct: &str) -> Assembled {
     assemble(RENDER_PRELUDE, user, params_struct, RENDER_EPILOGUE)
+}
+
+pub fn assemble_post(user: &str, params_struct: &str) -> Assembled {
+    assemble(POST_PRELUDE, user, params_struct, POST_EPILOGUE)
 }
 
 #[cfg(test)]
@@ -248,5 +322,23 @@ mod tests {
         let one = assemble_rule("x", "struct Params { a: f32, }\n");
         let two = assemble_rule("x", "struct Params {\n a: f32,\n}\n");
         assert_eq!(two.user_line_offset, one.user_line_offset + 2);
+    }
+
+    #[test]
+    fn post_offset_points_at_user_source_and_has_scene_bindings() {
+        let user = "fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> { return color; }";
+        let a = assemble_post(user, &params_wgsl(&[]));
+        let lines: Vec<&str> = a.source.lines().collect();
+        assert_eq!(lines[a.user_line_offset], user);
+        assert!(a.source.contains("var scene_tex: texture_2d<f32>;"));
+        assert!(a.source.contains("var prev_tex: texture_2d<f32>;"));
+        assert!(a.source.contains("fn scene(uv: vec2<f32>) -> vec4<f32>"));
+        assert!(a.source.contains("fn prev(uv: vec2<f32>) -> vec4<f32>"));
+        assert!(a.source.contains("@fragment"));
+    }
+
+    #[test]
+    fn default_post_is_a_passthrough() {
+        assert!(DEFAULT_POST.contains("return color;"));
     }
 }
