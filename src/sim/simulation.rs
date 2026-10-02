@@ -538,6 +538,41 @@ impl Simulation {
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
     }
 
+    /// Replaces the whole state with `data` (`width * height * 4` floats) without touching the
+    /// step counter. In 1D mode the diagram is considered full, so stepping scrolls from the
+    /// bottom row.
+    pub fn load_state(&mut self, data: &[f32]) -> Result<(), String> {
+        let c = &self.config;
+        let expected = (c.width * c.height * 4) as usize;
+        if data.len() != expected {
+            return Err(format!("state has {} values, expected {expected}", data.len()));
+        }
+        self.cur = 0;
+        for tex in &self.textures.tex {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(data),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(c.width * 16),
+                    rows_per_image: Some(c.height),
+                },
+                wgpu::Extent3d { width: c.width, height: c.height, depth_or_array_layers: 1 },
+            );
+        }
+        if c.mode == Mode::OneD {
+            self.globals.row = c.height;
+            self.globals.prev_row = c.height.saturating_sub(1);
+        }
+        self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+        Ok(())
+    }
+
     pub fn set_params(&mut self, data: ParamsData) {
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&data));
     }
@@ -1256,6 +1291,35 @@ mod gpu_tests {
         let s = samples.first().expect("a stats sample");
         assert_eq!(s.population, painted);
         assert_eq!(s.changed, painted);
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn load_state_round_trips_image_cells_into_both_textures() {
+        use crate::sim::seed_image::{image_to_cells, RgbaImage, SeedMode};
+        let _gpu = gpu_lock();
+        let Some(mut sim) = sim_with(SimConfig {
+            mode: Mode::TwoD,
+            width: 16,
+            height: 16,
+            init: InitPattern::Blank,
+            seed: 1,
+        }) else {
+            return;
+        };
+        // 2x2 image: white, black / black, white -> four 8x8 blocks.
+        let img = RgbaImage {
+            width: 2,
+            height: 2,
+            rgba: vec![255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255],
+        };
+        let cells = image_to_cells(&img, 16, 16, SeedMode::Luminance { threshold: 0.5 });
+        sim.load_state(&cells).unwrap();
+        let a = read_back(&sim, 0);
+        let b = read_back(&sim, 1);
+        assert_eq!(a, cells);
+        assert_eq!(b, cells, "both textures hold the loaded state");
+        assert!(sim.load_state(&cells[..8]).is_err(), "wrong size is rejected");
     }
 
     #[test]

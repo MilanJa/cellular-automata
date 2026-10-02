@@ -113,6 +113,13 @@ to it. By default the wave runs on the wall clock so a paused simulation still a
 *follow simulation* to make it pause with the simulation instead. Modulations are saved with
 the preset (`[modulation.<name>]` in `preset.toml`). Neon Life ships with a breathing `glow`.
 
+## Seeding from an image
+
+**Image → Seed grid from image…** (or drop a PNG onto the window) resamples the picture onto the
+grid. *Brightness → on/off* thresholds the luminance into live cells; *RGBA → channels* copies
+the four colour channels into the four cell channels. Change the mode or threshold and press
+**Re-apply image** to try again. Dropping a `*.capreset.toml` bundle imports it as a preset.
+
 ## Painting
 
 Drag on the grid with the left mouse button to paint cells, right button to erase. **Brush** (under

@@ -125,6 +125,8 @@ pub struct AppState {
     pub stuck: Option<crate::sim::stats::Stuck>,
     pub stuck_since: Option<Instant>,
     pub auto_reseed: bool,
+    /// How an imported image is turned into cells.
+    pub seed_mode: crate::sim::seed_image::SeedMode,
 }
 
 impl AppState {
@@ -161,6 +163,7 @@ impl AppState {
             stuck: None,
             stuck_since: None,
             auto_reseed: false,
+            seed_mode: Default::default(),
         }
     }
 }

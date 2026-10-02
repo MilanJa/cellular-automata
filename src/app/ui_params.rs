@@ -2,6 +2,7 @@ use super::App;
 use crate::app::modulation::{Modulation, Wave};
 use crate::preset::{InitPattern, Mode};
 use crate::shader::params::{ParamSpec, ParamType, ParamValue};
+use crate::sim::seed_image::SeedMode;
 
 fn slider_f32(ui: &mut egui::Ui, v: &mut f32, range: Option<(f64, f64)>) -> bool {
     match range {
@@ -137,6 +138,40 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.checkbox(&mut app.state.auto_reseed, "auto-reseed when stuck")
             .on_hover_text("Reset with a new seed after the grid has been static or periodic for 2 s");
     });
+
+    ui.separator();
+    ui.heading("Seed image");
+    ui.label(egui::RichText::new("Image → Seed grid from image…, or drop a PNG on the window.").weak());
+    let mut reapply = false;
+    ui.horizontal(|ui| {
+        let is_lum = matches!(app.state.seed_mode, SeedMode::Luminance { .. });
+        if ui.selectable_label(is_lum, "brightness → on/off").clicked() && !is_lum {
+            app.state.seed_mode = SeedMode::Luminance { threshold: 0.5 };
+            reapply = true;
+        }
+        if ui.selectable_label(!is_lum, "RGBA → channels").clicked() && is_lum {
+            app.state.seed_mode = SeedMode::Channels;
+            reapply = true;
+        }
+    });
+    if let SeedMode::Luminance { threshold } = &mut app.state.seed_mode {
+        ui.horizontal(|ui| {
+            ui.label("threshold");
+            if ui.add(egui::Slider::new(threshold, 0.0..=1.0)).changed() {
+                reapply = true;
+            }
+        });
+    }
+    if ui
+        .add_enabled(app.seed_image.is_some(), egui::Button::new("Re-apply image"))
+        .on_hover_text("Write the last image into the grid again with the settings above")
+        .clicked()
+    {
+        reapply = true;
+    }
+    if reapply && app.seed_image.is_some() {
+        app.apply_seed_image();
+    }
 
     ui.separator();
     ui.heading("Brush");

@@ -82,6 +82,44 @@ pub fn request_import() {
     *UPLOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
 }
 
+static UPLOADED_IMAGE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Asks for a PNG and queues its bytes for `poll_image_import`.
+pub fn request_image_import() {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Choose an image to seed the grid")
+        .add_filter("PNG image", &["png"])
+        .pick_file()
+    else {
+        return;
+    };
+    if let Ok(bytes) = std::fs::read(&path) {
+        *UPLOADED_IMAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(bytes);
+    }
+}
+
+pub fn poll_image_import() -> Option<Vec<u8>> {
+    UPLOADED_IMAGE.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+static DROPPED: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
+
+/// Queues a dropped file's name and bytes for `poll_dropped_files` (synchronous on the desktop).
+pub fn queue_dropped_file(file: &dyn egui::DroppedFile) {
+    let name = file.path().to_string_lossy().to_string();
+    let entry = match file.bytes() {
+        Ok(bytes) => (name, bytes),
+        Err(e) => (format!("__error__{name}: {e}"), Vec::new()),
+    };
+    DROPPED.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+}
+
+/// Dropped files whose bytes are available, oldest first. Names starting with `__error__` carry
+/// a read error message instead of a file.
+pub fn poll_dropped_files() -> Vec<(String, Vec<u8>)> {
+    std::mem::take(&mut *DROPPED.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 /// Returns an imported bundle once, parsed, or an error message.
 pub fn poll_import() -> Option<anyhow::Result<Preset>> {
     let text = UPLOADED.lock().unwrap_or_else(|e| e.into_inner()).take()?;

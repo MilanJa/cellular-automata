@@ -78,6 +78,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.rescan_presets();
         }
         let mut export_scale: Option<u32> = None;
+        let mut seed_requested = false;
         ui.menu_button("Image", |ui| {
             ui.label(egui::RichText::new("Save the grid as a PNG, pixels per cell:").small().weak());
             for s in [1u32, 2, 4] {
@@ -86,9 +87,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.close();
                 }
             }
+            ui.separator();
+            if ui.button("Seed grid from image…").on_hover_text("Or drop a PNG onto the window").clicked() {
+                seed_requested = true;
+                ui.close();
+            }
         });
         if let Some(s) = export_scale {
             app.export_image(s);
+        }
+        if seed_requested {
+            app.request_seed_image();
         }
 
         ui.separator();

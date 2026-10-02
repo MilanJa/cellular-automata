@@ -151,6 +151,66 @@ pub fn poll_import() -> Option<anyhow::Result<Preset>> {
     Some(from_bundle(&text))
 }
 
+thread_local! {
+    static UPLOADED_IMAGE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+/// Opens the browser file picker for a PNG; its bytes are queued for `poll_image_import`.
+pub fn request_image_import() {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+    let Ok(el) = document.create_element("input") else { return };
+    let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() else { return };
+    input.set_type("file");
+    input.set_accept("image/png");
+    let input_for_cb = input.clone();
+    let on_change = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        let Some(files) = input_for_cb.files() else { return };
+        let Some(file) = files.get(0) else { return };
+        let Ok(reader) = web_sys::FileReader::new() else { return };
+        let reader_for_cb = reader.clone();
+        let on_load = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            if let Ok(result) = reader_for_cb.result() {
+                let bytes = js_sys::Uint8Array::new(&result).to_vec();
+                UPLOADED_IMAGE.with(|u| *u.borrow_mut() = Some(bytes));
+            }
+        });
+        reader.set_onload(Some(on_load.as_ref().unchecked_ref()));
+        on_load.forget();
+        let _ = reader.read_as_array_buffer(&file);
+    });
+    input.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    on_change.forget();
+    input.click();
+}
+
+pub fn poll_image_import() -> Option<Vec<u8>> {
+    UPLOADED_IMAGE.with(|u| u.borrow_mut().take())
+}
+
+thread_local! {
+    static DROPPED: RefCell<Vec<(String, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Reads a dropped file asynchronously and queues it for `poll_dropped_files`.
+pub fn queue_dropped_file(file: &dyn egui::DroppedFile) {
+    let name = file.path().to_string_lossy().to_string();
+    let Some(web_file) = file.web_file().cloned() else {
+        DROPPED.with(|d| d.borrow_mut().push((format!("__error__{name}: no file handle"), Vec::new())));
+        return;
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        let entry = match wasm_bindgen_futures::JsFuture::from(web_file.array_buffer()).await {
+            Ok(buf) => (name, js_sys::Uint8Array::new(&buf).to_vec()),
+            Err(_) => (format!("__error__{name}: could not read"), Vec::new()),
+        };
+        DROPPED.with(|d| d.borrow_mut().push(entry));
+    });
+}
+
+pub fn poll_dropped_files() -> Vec<(String, Vec<u8>)> {
+    DROPPED.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
 /// `?preset=<id>` from the page URL.
 pub fn startup_preset_from_url() -> Option<String> {
     let search = web_sys::window()?.location().search().ok()?;

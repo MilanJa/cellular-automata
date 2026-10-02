@@ -20,6 +20,7 @@ use crate::app::modulation::modulated_values;
 use crate::app::mutate::mutate_values;
 use crate::sim::stats::detect_stuck;
 use crate::sim::paint::{pointer_to_cell, Stroke};
+use crate::sim::seed_image::{decode_png, image_to_cells, RgbaImage};
 use crate::sim::Simulation;
 use crate::viewport::show_viewport;
 use state::{
@@ -60,6 +61,8 @@ pub struct App {
     last_viewport: Option<egui::Rect>,
     /// Wall clock for modulations that do not follow simulation time.
     launched: web_time::Instant,
+    /// The last image used as a seed, kept so mode changes can re-apply it.
+    pub(crate) seed_image: Option<RgbaImage>,
 }
 
 impl App {
@@ -117,6 +120,7 @@ impl App {
             strokes: Vec::new(),
             last_viewport: None,
             launched: web_time::Instant::now(),
+            seed_image: None,
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
@@ -346,6 +350,75 @@ impl App {
         }
     }
 
+    pub(crate) fn request_seed_image(&mut self) {
+        platform::request_image_import();
+    }
+
+    /// Decodes PNG bytes and writes them into the grid using the current seed mode.
+    pub(crate) fn seed_from_png(&mut self, bytes: &[u8]) {
+        match decode_png(bytes) {
+            Ok(img) => {
+                self.seed_image = Some(img);
+                self.apply_seed_image();
+            }
+            Err(e) => self.report(format!("could not read image: {e:#}")),
+        }
+    }
+
+    /// Writes the remembered seed image into the grid (again).
+    pub(crate) fn apply_seed_image(&mut self) {
+        let Some(img) = &self.seed_image else { return };
+        let mut sim = self.sim.lock().unwrap();
+        let (w, h) = {
+            let c = sim.config();
+            (c.width, c.height)
+        };
+        let cells = image_to_cells(img, w, h, self.state.seed_mode);
+        let result = sim.load_state(&cells);
+        drop(sim);
+        if let Err(e) = result {
+            self.report(e);
+        }
+        self.clear_stats();
+    }
+
+    fn poll_dropped_and_imported_files(&mut self) {
+        if let Some(bytes) = platform::poll_image_import() {
+            self.seed_from_png(&bytes);
+        }
+    }
+
+    /// Dropped files: PNGs seed the grid, `.toml` bundles are imported as presets.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in &dropped {
+            platform::queue_dropped_file(file.as_ref());
+        }
+        for (name, bytes) in platform::poll_dropped_files() {
+            if let Some(err) = name.strip_prefix("__error__") {
+                self.report(format!("could not read dropped file {err}"));
+                continue;
+            }
+            let name = name.to_lowercase();
+            if name.ends_with(".png") {
+                self.seed_from_png(&bytes);
+            } else if name.ends_with(".toml") {
+                match std::str::from_utf8(&bytes)
+                    .map_err(anyhow::Error::from)
+                    .and_then(crate::preset::bundle::from_bundle)
+                {
+                    Ok(p) => {
+                        self.load_preset(p, PresetSource::Imported);
+                        self.state.modified = true;
+                    }
+                    Err(e) => self.report(format!("dropped file is not a preset bundle: {e:#}")),
+                }
+            } else {
+                self.report(format!("unsupported file type: {name} (PNG images and .toml bundles)"));
+            }
+        }
+    }
+
     pub(crate) fn clear_stats(&mut self) {
         self.state.stats.clear();
         self.state.stuck = None;
@@ -465,6 +538,8 @@ impl eframe::App for App {
         self.poll_import();
         self.poll_export_image();
         self.poll_stats();
+        self.poll_dropped_and_imported_files();
+        self.handle_dropped_files(&ctx);
         if self.modulation_active() {
             self.push_params();
         }
