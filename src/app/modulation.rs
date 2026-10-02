@@ -5,8 +5,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio::analysis::AudioLevels;
 use crate::shader::params::{ParamSpec, ParamValue};
 
+/// A modulation source: a periodic wave of time, or a live audio level.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Wave {
@@ -15,10 +17,21 @@ pub enum Wave {
     Square,
     Saw,
     Noise,
+    AudioLevel,
+    AudioLow,
+    AudioMid,
+    AudioHigh,
 }
 
 impl Wave {
+    /// The time-based waves.
     pub const ALL: [Wave; 5] = [Wave::Sine, Wave::Triangle, Wave::Square, Wave::Saw, Wave::Noise];
+    /// The audio sources (unipolar: 0 in silence, 1 at the recent peak).
+    pub const AUDIO: [Wave; 4] = [Wave::AudioLevel, Wave::AudioLow, Wave::AudioMid, Wave::AudioHigh];
+
+    pub fn is_audio(self) -> bool {
+        matches!(self, Wave::AudioLevel | Wave::AudioLow | Wave::AudioMid | Wave::AudioHigh)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -27,6 +40,20 @@ impl Wave {
             Wave::Square => "square",
             Wave::Saw => "saw",
             Wave::Noise => "noise",
+            Wave::AudioLevel => "level",
+            Wave::AudioLow => "low",
+            Wave::AudioMid => "mid",
+            Wave::AudioHigh => "high",
+        }
+    }
+
+    fn audio_value(self, levels: &AudioLevels) -> f32 {
+        match self {
+            Wave::AudioLevel => levels.level,
+            Wave::AudioLow => levels.low,
+            Wave::AudioMid => levels.mid,
+            Wave::AudioHigh => levels.high,
+            _ => 0.0,
         }
     }
 }
@@ -74,6 +101,8 @@ pub fn wave_value(wave: Wave, t: f32) -> f32 {
         }
         Wave::Saw => x * 2.0 - 1.0,
         Wave::Noise => smooth_noise(t),
+        // Audio sources have no time dependence; see `modulate_with`.
+        Wave::AudioLevel | Wave::AudioLow | Wave::AudioMid | Wave::AudioHigh => 0.0,
     }
 }
 
@@ -101,7 +130,19 @@ fn time_for(m: &Modulation, wall: f32, sim: f32) -> f32 {
 
 /// Applies `m` to a numeric value at `time` seconds. Vectors and bools pass through unchanged.
 pub fn modulate(base: &ParamValue, spec: &ParamSpec, m: &Modulation, time: f32) -> ParamValue {
-    let w = wave_value(m.wave, time * m.freq + m.phase);
+    modulate_with(base, spec, m, time, &AudioLevels::default())
+}
+
+/// `modulate`, with live audio levels for the audio sources. Waves are bipolar (-1..1), audio
+/// sources unipolar (0..1), so a silent input leaves the slider's centre value untouched.
+pub fn modulate_with(
+    base: &ParamValue,
+    spec: &ParamSpec,
+    m: &Modulation,
+    time: f32,
+    levels: &AudioLevels,
+) -> ParamValue {
+    let w = if m.wave.is_audio() { m.wave.audio_value(levels) } else { wave_value(m.wave, time * m.freq + m.phase) };
     match base {
         ParamValue::F32(v) => {
             let span = spec.range.map(|(lo, hi)| (hi - lo) as f32).unwrap_or(v.abs().max(1.0));
@@ -131,10 +172,21 @@ pub fn modulated_values(
     wall_time: f32,
     sim_time: f32,
 ) -> BTreeMap<String, ParamValue> {
+    modulated_values_with_audio(specs, values, modulations, wall_time, sim_time, &AudioLevels::default())
+}
+
+pub fn modulated_values_with_audio(
+    specs: &[ParamSpec],
+    values: &BTreeMap<String, ParamValue>,
+    modulations: &BTreeMap<String, Modulation>,
+    wall_time: f32,
+    sim_time: f32,
+    levels: &AudioLevels,
+) -> BTreeMap<String, ParamValue> {
     let mut out = values.clone();
     for spec in specs {
         if let (Some(m), Some(base)) = (modulations.get(&spec.name), values.get(&spec.name)) {
-            out.insert(spec.name.clone(), modulate(base, spec, m, time_for(m, wall_time, sim_time)));
+            out.insert(spec.name.clone(), modulate_with(base, spec, m, time_for(m, wall_time, sim_time), levels));
         }
     }
     out
@@ -238,5 +290,22 @@ mod tests {
         let out = modulated_values(&specs, &values, &mods, 0.6, 0.1);
         assert_eq!(out["a"], ParamValue::F32(0.7));
         assert_eq!(out["b"], ParamValue::F32(0.2));
+    }
+
+    #[test]
+    fn audio_sources_are_unipolar_and_use_the_live_levels() {
+        use crate::audio::analysis::AudioLevels;
+        let specs = parse_params("// @param a: f32 = 0.2 range 0.0 .. 1.0\n").unwrap();
+        let values: BTreeMap<_, _> = [("a".to_string(), ParamValue::F32(0.2))].into();
+        let mut mods = BTreeMap::new();
+        mods.insert("a".to_string(), Modulation { wave: Wave::AudioLow, freq: 1.0, amount: 0.5, phase: 0.0, follow_sim: false });
+        let levels = AudioLevels { level: 0.9, low: 0.5, mid: 0.1, high: 0.0 };
+        let out = modulated_values_with_audio(&specs, &values, &mods, 0.0, 0.0, &levels);
+        assert_eq!(out["a"], ParamValue::F32(0.45), "centre + amount * span * low");
+        let silent = modulated_values_with_audio(&specs, &values, &mods, 0.0, 0.0, &AudioLevels::default());
+        assert_eq!(silent["a"], ParamValue::F32(0.2), "silence leaves the centre value");
+        assert!(Wave::AudioLevel.is_audio() && !Wave::Sine.is_audio());
+        let text = toml::to_string(&mods["a"]).unwrap();
+        assert!(text.contains("wave = \"audiolow\""), "{text}");
     }
 }

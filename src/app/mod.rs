@@ -18,7 +18,9 @@ use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
 use crate::preset::Preset;
 use crate::shader::params::{pack_params, ParamValue};
 use crate::shader::validate::ShaderFile;
-use crate::app::modulation::modulated_values;
+use crate::app::modulation::modulated_values_with_audio;
+use crate::audio::analysis::AudioLevels;
+use crate::audio::AudioInput;
 use crate::app::mutate::mutate_values;
 use crate::sim::stats::detect_stuck;
 use crate::sim::paint::{pointer_to_cell, Stroke};
@@ -85,6 +87,9 @@ pub struct App {
     render_state: eframe::egui_wgpu::RenderState,
     /// Optional second automaton readable from the shaders via `other()`.
     pub(crate) layer_b: Option<Arc<Mutex<LayerB>>>,
+    /// Microphone input while enabled, and the latest analysed levels.
+    pub(crate) audio: Option<AudioInput>,
+    pub(crate) audio_levels: AudioLevels,
 }
 
 impl App {
@@ -150,6 +155,8 @@ impl App {
             explorer: None,
             render_state: rs.clone(),
             layer_b: None,
+            audio: None,
+            audio_levels: AudioLevels::default(),
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
@@ -260,7 +267,36 @@ impl App {
         }
         let wall = self.launched.elapsed().as_secs_f32();
         let sim = self.state.started.elapsed().as_secs_f32();
-        modulated_values(&self.state.specs, &self.state.values, &self.state.modulations, wall, sim)
+        modulated_values_with_audio(
+            &self.state.specs,
+            &self.state.values,
+            &self.state.modulations,
+            wall,
+            sim,
+            &self.audio_levels,
+        )
+    }
+
+    pub(crate) fn toggle_audio(&mut self) {
+        if self.audio.is_some() {
+            self.audio = None;
+            self.audio_levels = AudioLevels::default();
+            return;
+        }
+        match AudioInput::start() {
+            Ok(input) => self.audio = Some(input),
+            Err(e) => self.report(format!("could not open the microphone: {e:#}")),
+        }
+    }
+
+    fn poll_audio(&mut self) {
+        let Some(input) = &mut self.audio else { return };
+        self.audio_levels = input.levels();
+        #[cfg(target_arch = "wasm32")]
+        if let Some(err) = input.error() {
+            self.audio = None;
+            self.report(err);
+        }
     }
 
     /// True when some modulated param is one the shaders actually declare.
@@ -757,6 +793,7 @@ impl eframe::App for App {
         self.poll_import();
         self.poll_export_image();
         self.poll_stats();
+        self.poll_audio();
         self.poll_dropped_and_imported_files();
         self.handle_dropped_files(&ctx);
         if self.modulation_active() {
@@ -809,7 +846,12 @@ impl eframe::App for App {
             ui_topbar::timeline(self, ui);
         });
 
-        if self.state.playing || self.export_pending() || self.modulation_active() || self.recording.is_some() {
+        if self.state.playing
+            || self.export_pending()
+            || self.modulation_active()
+            || self.recording.is_some()
+            || self.audio.is_some()
+        {
             ctx.request_repaint();
         }
         ui_topbar::record_dialog(self, &ctx);

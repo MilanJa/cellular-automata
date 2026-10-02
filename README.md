@@ -173,6 +173,13 @@ grid. *Brightness → on/off* thresholds the luminance into live cells; *RGBA �
 the four colour channels into the four cell channels. Change the mode or threshold and press
 **Re-apply image** to try again. Dropping a `*.capreset.toml` bundle imports it as a preset.
 
+## Audio reactivity
+
+**Audio → Enable microphone** (Params panel) opens the default input; the browser asks for
+permission. Four live levels (overall, low, mid, high band, each auto-gained to 0..1) appear as
+meters and as sources in every slider's **~** menu next to the waves. Audio sources are
+unipolar: silence leaves the slider's value, sound pushes it up by `amount` of its range.
+
 ## Painting
 
 Drag on the grid with the left mouse button to paint cells, right button to erase. **Brush** (under

@@ -140,6 +140,36 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
 
     ui.separator();
+    ui.heading("Audio");
+    ui.horizontal(|ui| {
+        let label = if app.audio.is_some() { "Disable microphone" } else { "Enable microphone" };
+        if ui.button(label).on_hover_text("Audio levels become modulation sources in each slider's ~ menu").clicked() {
+            app.toggle_audio();
+        }
+        if let Some(input) = &app.audio {
+            ui.label(egui::RichText::new(&input.device_name).weak());
+        }
+    });
+    if app.audio.is_some() {
+        let l = app.audio_levels;
+        egui::Grid::new("audio-meters").num_columns(2).show(ui, |ui| {
+            for (name, v) in [("level", l.level), ("low", l.low), ("mid", l.mid), ("high", l.high)] {
+                ui.label(name);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 10.0), egui::Sense::hover());
+                let painter = ui.painter();
+                painter.rect_filled(rect, 2.0, egui::Color32::from_gray(35));
+                let w = rect.width() * v.clamp(0.0, 1.0);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(rect.min, egui::vec2(w, rect.height())),
+                    2.0,
+                    egui::Color32::from_rgb(120, 200, 255),
+                );
+                ui.end_row();
+            }
+        });
+    }
+
+    ui.separator();
     ui.heading("Layer B");
     ui.label(
         egui::RichText::new("A second automaton running alongside; shaders read it with other(x, y).")
@@ -234,6 +264,7 @@ fn modulation_button(
     live: Option<&std::collections::BTreeMap<String, ParamValue>>,
 ) -> bool {
     let active = app.state.modulations.contains_key(&spec.name);
+    let audio_on = app.audio.is_some();
     let mut changed = false;
     let label = if active {
         egui::RichText::new("~").strong().color(egui::Color32::from_rgb(120, 200, 255))
@@ -264,22 +295,36 @@ fn modulation_button(
                         }
                     });
                     ui.end_row();
-                    ui.label("freq (Hz)");
-                    changed |= ui
-                        .add(egui::Slider::new(&mut m.freq, 0.01..=5.0).logarithmic(true))
-                        .changed();
+                    ui.label("audio");
+                    ui.horizontal_wrapped(|ui| {
+                        for w in Wave::AUDIO {
+                            changed |= ui.selectable_value(&mut m.wave, w, w.label()).changed();
+                        }
+                        if !audio_on {
+                            ui.label(egui::RichText::new("(enable the microphone below)").weak().small());
+                        }
+                    });
                     ui.end_row();
+                    if !m.wave.is_audio() {
+                        ui.label("freq (Hz)");
+                        changed |= ui
+                            .add(egui::Slider::new(&mut m.freq, 0.01..=5.0).logarithmic(true))
+                            .changed();
+                        ui.end_row();
+                    }
                     ui.label("amount");
                     changed |= ui.add(egui::Slider::new(&mut m.amount, 0.0..=1.0)).changed();
                     ui.end_row();
-                    ui.label("phase");
-                    changed |= ui.add(egui::Slider::new(&mut m.phase, 0.0..=1.0)).changed();
-                    ui.end_row();
-                    ui.label("clock");
-                    changed |= ui
-                        .checkbox(&mut m.follow_sim, "follow simulation (pauses with it)")
-                        .changed();
-                    ui.end_row();
+                    if !m.wave.is_audio() {
+                        ui.label("phase");
+                        changed |= ui.add(egui::Slider::new(&mut m.phase, 0.0..=1.0)).changed();
+                        ui.end_row();
+                        ui.label("clock");
+                        changed |= ui
+                            .checkbox(&mut m.follow_sim, "follow simulation (pauses with it)")
+                            .changed();
+                        ui.end_row();
+                    }
                 });
                 if ui.button("Remove").clicked() {
                     app.state.modulations.remove(&spec.name);
