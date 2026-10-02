@@ -59,7 +59,7 @@ the error panel shows the line and, for the common mistakes, a plain-language hi
 
 ## Starting from a template
 
-The **New ▾** menu creates an unsaved preset from a commented skeleton that runs as-is:
+The **+ New** menu creates an unsaved preset from a commented skeleton that runs as-is:
 *2D binary*, *Life-like with B/S switches* (no code, just checkboxes), *1D elementary*,
 *2D continuous* (diffusion with a reaction term), and *Render only* (Life with a render shader
 to play with). Edit, press Ctrl+Enter, then **Save as…** when you like the result.

@@ -42,7 +42,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.report(msg);
         }
         let mut new_template: Option<usize> = None;
-        ui.menu_button("New ▾", |ui| {
+        ui.menu_button("+ New", |ui| {
             ui.label(egui::RichText::new("Start from a commented template").small().weak());
             for (i, t) in TEMPLATES.iter().enumerate() {
                 let name = load_builtin(t).meta.name;
