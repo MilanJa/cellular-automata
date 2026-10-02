@@ -63,10 +63,10 @@ the error panel shows the line and, for the common mistakes, a plain-language hi
 
 ## Starting from a template
 
-The **+ New** menu creates an unsaved preset from a commented skeleton that runs as-is:
+**File → New from template** creates an unsaved preset from a commented skeleton that runs as-is:
 *2D binary*, *Life-like with B/S switches* (no code, just checkboxes), *1D elementary*,
 *2D continuous* (diffusion with a reaction term), and *Render only* (Life with a render shader
-to play with). Edit, press Ctrl+Enter, then **Save as…** when you like the result.
+to play with). Edit, press Ctrl+Enter, then **File → Save as…** when you like the result.
 
 Compile errors show in the bottom panel with the line number in *your* source. Click an
 error to jump to it. The previous working shader keeps running until the new one compiles.
@@ -124,7 +124,7 @@ generations back. `prev_cell` always reads the right row.
 ## Presets
 
 A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`. Folders under
-`./presets` appear in the dropdown (click **Rescan** after adding one). **Save** writes back to
+`./presets` appear in the dropdown (**File → Rescan presets** after adding one). **File → Save** (Ctrl+S) writes back to
 a preset's folder; **Save as…** picks a new folder. Built-ins: Rule 30, Rule 110, Game of
 Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule is plain Life but
 whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
@@ -132,7 +132,7 @@ how much the render side alone can do.
 
 ## Sharing a scene
 
-**Share** copies a link to the clipboard that reproduces the current scene exactly (shaders,
+**File → Copy share link** copies a link to the clipboard that reproduces the current scene exactly (shaders,
 grid, params, modulations) in the web version: the preset is compressed into the URL fragment,
 so nothing is uploaded anywhere. The desktop build produces the same links.
 
@@ -147,13 +147,13 @@ the preset (`[modulation.<name>]` in `preset.toml`). Neon Life ships with a brea
 
 ## Rule explorer
 
-**Explore** opens a window with sixteen random Life-like rules (B/S notation) running live at
+**View → Rule explorer** opens a window with sixteen random Life-like rules (B/S notation) running live at
 low resolution. Click a thumbnail to load that rule as a new preset; **Shuffle** draws a new batch.
 Rules with no births or with B0 are skipped.
 
 ## Recording an animation
 
-**Image > Record animation…** captures a number of frames while the simulation plays and saves
+**Image → Record animation…** captures a number of frames while the simulation plays and saves
 them as a looping animated PNG (APNG, which browsers and most viewers play). Choose pixels per
 cell, frame count and playback rate; frames are captured as fast as the GPU returns them and are
 buffered within a 256 MB budget. **Stop** in the status bar ends a recording early and keeps what
@@ -197,7 +197,7 @@ what the next generation reads. Painting works while paused.
 
 ## Exporting an image
 
-**Image → 1× / 2× / 4×** saves the current grid as a lossless PNG, coloured by the render shader,
+**Image → Export PNG** (1, 2 or 4 px per cell) saves the current grid as a lossless PNG, coloured by the render shader,
 at one, two or four pixels per cell (no UI, no letterbox). The desktop asks where to save; the
 browser downloads `<preset>-step<N>.png`.
 
@@ -218,7 +218,7 @@ Every push to `main` publishes it to https://milanja.github.io/cellular-automata
 Add `?preset=rule30` to the URL to start on a built-in.
 
 Differences from the desktop build: presets are saved in the browser's local storage
-(the "Browser storage" section of the dropdown) instead of folders, and **Export** / **Import**
+(the "Browser storage" section of the dropdown) instead of folders, and **File → Export bundle…** / **Import bundle…**
 move a single `*.capreset.toml` bundle in and out. Export and Import exist on the desktop too, so
 a preset can travel between the two.
 

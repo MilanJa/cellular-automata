@@ -854,6 +854,9 @@ impl eframe::App for App {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
             self.apply_shaders();
         }
+        if ctx.input_mut(|i| i.consume_shortcut(&ui_topbar::SAVE_SHORTCUT)) {
+            self.save();
+        }
         let typing = ctx.memory(|m| m.focused().is_some());
         if !typing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
             self.state.playing = !self.state.playing;

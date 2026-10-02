@@ -5,157 +5,172 @@ use crate::platform;
 use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
 use crate::preset::Preset;
 
+pub const SAVE_SHORTCUT: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+
+/// Menu bar: File / Image / View menus, the preset picker, transport controls and the status
+/// readout pinned to the right.
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        let label = if app.state.modified {
-            format!("{} *", app.state.preset_name)
-        } else {
-            app.state.preset_name.clone()
-        };
-        let mut to_load: Option<(Preset, PresetSource)> = None;
-        let mut to_load_saved: Option<platform::SavedLocation> = None;
-        egui::ComboBox::from_id_salt("preset").selected_text(label).width(260.0).show_ui(ui, |ui| {
-            ui.label(egui::RichText::new("Built-in").small().weak());
-            for (i, b) in BUILTINS.iter().enumerate() {
-                let p = load_builtin(b);
-                let selected = app.state.source == PresetSource::Builtin(i);
-                if ui.selectable_label(selected, &p.meta.name).clicked() {
-                    to_load = Some((p, PresetSource::Builtin(i)));
-                }
-            }
-            if !app.state.saved_presets.is_empty() {
-                ui.separator();
-                ui.label(egui::RichText::new(platform::SAVED_SECTION_LABEL).small().weak());
-                for (name, location) in app.state.saved_presets.clone() {
-                    let selected = app.state.source == PresetSource::Saved(location.clone());
-                    if ui.selectable_label(selected, &name).clicked() {
-                        to_load_saved = Some(location);
-                    }
-                }
-            }
-        });
-        if let Some((p, src)) = to_load {
-            app.load_preset(p, src);
-        }
-        if let Some(location) = to_load_saved {
-            app.load_saved(location);
-        }
-        let mut new_template: Option<usize> = None;
-        ui.menu_button("+ New", |ui| {
-            ui.label(egui::RichText::new("Start from a commented template").small().weak());
+    egui::containers::menu::MenuBar::new().ui(ui, |ui| {
+        file_menu(app, ui);
+        image_menu(app, ui);
+        view_menu(app, ui);
+        ui.separator();
+        preset_picker(app, ui);
+        ui.separator();
+        transport(app, ui);
+        status(app, ui);
+    });
+}
+
+fn file_menu(app: &mut App, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    ui.menu_button("File", |ui| {
+        ui.menu_button("New from template", |ui| {
+            ui.label(egui::RichText::new("Commented starting points").small().weak());
             for (i, t) in TEMPLATES.iter().enumerate() {
-                let name = load_builtin(t).meta.name;
-                if ui.button(name).clicked() {
-                    new_template = Some(i);
+                if ui.button(load_builtin(t).meta.name).clicked() {
+                    app.load_template(i);
                     ui.close();
                 }
             }
         });
-        if let Some(i) = new_template {
-            app.load_template(i);
-        }
         ui.separator();
         let save_hint = if platform::is_web() {
             "Save to this browser (built-ins and templates: Save As)"
         } else {
             "Save to this preset's folder (built-ins and templates: Save As)"
         };
-        if ui.button("Save").on_hover_text(save_hint).clicked() {
+        let save = egui::Button::new("Save").shortcut_text(ctx.format_shortcut(&SAVE_SHORTCUT));
+        if ui.add(save).on_hover_text(save_hint).clicked() {
             app.save();
         }
         if ui.button("Save as…").clicked() {
             app.save_as();
         }
-        if ui.button("Export").on_hover_text("Download / write a single-file preset bundle").clicked() {
+        ui.separator();
+        if ui.button("Export bundle…").on_hover_text("Download / write a single-file preset bundle").clicked() {
             app.export();
         }
-        if ui.button("Import").on_hover_text("Load a preset bundle file").clicked() {
+        if ui.button("Import bundle…").on_hover_text("Load a preset bundle file").clicked() {
             app.import();
         }
-        if ui.button("Share").on_hover_text("Copy a link that opens this exact scene in the web version").clicked() {
-            let ctx = ui.ctx().clone();
+        if ui.button("Copy share link").on_hover_text("A link that opens this exact scene in the web version").clicked() {
             app.share(&ctx);
         }
+        if !platform::is_web() {
+            ui.separator();
+            if ui.button("Rescan presets").on_hover_text("Rescan ./presets").clicked() {
+                app.rescan_presets();
+            }
+        }
+    });
+}
+
+fn image_menu(app: &mut App, ui: &mut egui::Ui) {
+    ui.menu_button("Image", |ui| {
+        ui.label(egui::RichText::new("Save the grid as a PNG").small().weak());
+        for (s, label) in [(1u32, "Export PNG, 1 px per cell"), (2, "Export PNG, 2 px per cell"), (4, "Export PNG, 4 px per cell")] {
+            if ui.button(label).clicked() {
+                app.export_image(s);
+            }
+        }
         ui.separator();
+        if ui.button("Seed grid from image…").on_hover_text("Or drop a PNG onto the window").clicked() {
+            app.request_seed_image();
+        }
+        if ui.button("Record animation…").on_hover_text("Capture frames into a looping animated PNG").clicked() {
+            app.open_record_dialog();
+        }
+    });
+}
+
+fn view_menu(app: &mut App, ui: &mut egui::Ui) {
+    ui.menu_button("View", |ui| {
         if ui
-            .selectable_label(app.explorer.is_some(), "Explore")
+            .selectable_label(app.explorer.is_some(), "Rule explorer")
             .on_hover_text("A grid of random Life-like rules running live; click one to load it")
             .clicked()
         {
             app.toggle_explorer();
         }
-        if !platform::is_web() && ui.button("Rescan").on_hover_text("Rescan ./presets").clicked() {
-            app.rescan_presets();
-        }
-        let mut export_scale: Option<u32> = None;
-        let mut seed_requested = false;
-        let mut record_requested = false;
-        ui.menu_button("Image", |ui| {
-            ui.label(egui::RichText::new("Save the grid as a PNG, pixels per cell:").small().weak());
-            for s in [1u32, 2, 4] {
-                if ui.button(format!("{s}×")).clicked() {
-                    export_scale = Some(s);
-                    ui.close();
-                }
+    });
+}
+
+fn preset_picker(app: &mut App, ui: &mut egui::Ui) {
+    let label = if app.state.modified {
+        format!("{} *", app.state.preset_name)
+    } else {
+        app.state.preset_name.clone()
+    };
+    let mut to_load: Option<(Preset, PresetSource)> = None;
+    let mut to_load_saved: Option<platform::SavedLocation> = None;
+    egui::ComboBox::from_id_salt("preset").selected_text(label).width(240.0).show_ui(ui, |ui| {
+        ui.label(egui::RichText::new("Built-in").small().weak());
+        for (i, b) in BUILTINS.iter().enumerate() {
+            let p = load_builtin(b);
+            let selected = app.state.source == PresetSource::Builtin(i);
+            if ui.selectable_label(selected, &p.meta.name).clicked() {
+                to_load = Some((p, PresetSource::Builtin(i)));
             }
+        }
+        if !app.state.saved_presets.is_empty() {
             ui.separator();
-            if ui.button("Seed grid from image…").on_hover_text("Or drop a PNG onto the window").clicked() {
-                seed_requested = true;
-                ui.close();
-            }
-            if ui.button("Record animation…").on_hover_text("Capture frames into a looping animated PNG").clicked() {
-                record_requested = true;
-                ui.close();
-            }
-        });
-        if record_requested {
-            app.open_record_dialog();
-        }
-        if let Some(s) = export_scale {
-            app.export_image(s);
-        }
-        if seed_requested {
-            app.request_seed_image();
-        }
-
-        ui.separator();
-        let play = if app.state.playing {
-            egui::Button::new("⏸ Pause")
-        } else {
-            egui::Button::new(egui::RichText::new("▶ Play").color(theme::ACCENT).strong())
-        };
-        if ui.add(play).on_hover_text("Space").clicked() {
-            app.state.playing = !app.state.playing;
-        }
-        if ui.add_enabled(!app.state.playing, egui::Button::new("⏭ Step")).clicked() {
-            app.state.step_once = true;
-        }
-        ui.label("steps/frame");
-        if ui.add(egui::DragValue::new(&mut app.state.steps_per_frame).range(1..=256)).changed() {
-            app.state.modified = true;
-        }
-        if ui.button("↺ Reset").on_hover_text("Apply grid settings and re-initialise").clicked() {
-            app.apply_settings_and_reset();
-        }
-
-        let frame = app.sim.lock().unwrap().frame();
-        let steps_per_sec = app.rate.update(web_time::Instant::now(), frame);
-        let dt = ui.input(|i| i.stable_dt).max(1e-6);
-        // Status lives at the right edge, so the controls keep a stable position.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt))
-                    .weak(),
-            );
-            if let Some((done, total)) = app.recording_progress() {
-                if ui.small_button("Stop").clicked() {
-                    app.stop_recording();
+            ui.label(egui::RichText::new(platform::SAVED_SECTION_LABEL).small().weak());
+            for (name, location) in app.state.saved_presets.clone() {
+                let selected = app.state.source == PresetSource::Saved(location.clone());
+                if ui.selectable_label(selected, &name).clicked() {
+                    to_load_saved = Some(location);
                 }
-                ui.colored_label(theme::ERROR, format!("● recording {done}/{total}"));
-            } else if app.export_pending() {
-                ui.label(egui::RichText::new("exporting image…").weak());
             }
-        });
+        }
+    });
+    if let Some((p, src)) = to_load {
+        app.load_preset(p, src);
+    }
+    if let Some(location) = to_load_saved {
+        app.load_saved(location);
+    }
+}
+
+fn transport(app: &mut App, ui: &mut egui::Ui) {
+    let play = if app.state.playing {
+        egui::Button::new("⏸ Pause")
+    } else {
+        egui::Button::new(egui::RichText::new("▶ Play").color(theme::ACCENT).strong())
+    };
+    if ui.add(play).on_hover_text("Space").clicked() {
+        app.state.playing = !app.state.playing;
+    }
+    if ui.add_enabled(!app.state.playing, egui::Button::new("⏭ Step")).clicked() {
+        app.state.step_once = true;
+    }
+    ui.label("steps/frame");
+    if ui.add(egui::DragValue::new(&mut app.state.steps_per_frame).range(1..=256)).changed() {
+        app.state.modified = true;
+    }
+    if ui.button("↺ Reset").on_hover_text("Apply grid settings and re-initialise").clicked() {
+        app.apply_settings_and_reset();
+    }
+}
+
+fn status(app: &mut App, ui: &mut egui::Ui) {
+    let frame = app.sim.lock().unwrap().frame();
+    let steps_per_sec = app.rate.update(web_time::Instant::now(), frame);
+    let dt = ui.input(|i| i.stable_dt).max(1e-6);
+    // Status lives at the right edge, so the controls keep a stable position.
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(
+            egui::RichText::new(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt)).weak(),
+        );
+        if let Some((done, total)) = app.recording_progress() {
+            if ui.small_button("Stop").clicked() {
+                app.stop_recording();
+            }
+            ui.colored_label(theme::ERROR, format!("● recording {done}/{total}"));
+        } else if app.export_pending() {
+            ui.label(egui::RichText::new("exporting image…").weak());
+        }
     });
 }
 
