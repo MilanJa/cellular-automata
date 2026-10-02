@@ -614,6 +614,12 @@ impl Simulation {
         self.compute.is_some() && self.render.is_some() && self.post.is_some()
     }
 
+    /// The rendered picture (before post-processing), once a scene size has been set. The view
+    /// stays valid until the scene is resized, so it can be registered as an egui texture.
+    pub fn scene_view(&self) -> Option<&wgpu::TextureView> {
+        self.scene.as_ref().map(|s| &s.scene_view)
+    }
+
     /// Makes sure the scene and post targets match the viewport's pixel size.
     pub fn ensure_scene_size(&mut self, width: u32, height: u32) {
         let (width, height) = (width.max(1), height.max(1));

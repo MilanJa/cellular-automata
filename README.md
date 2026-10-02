@@ -133,6 +133,12 @@ to it. By default the wave runs on the wall clock so a paused simulation still a
 *follow simulation* to make it pause with the simulation instead. Modulations are saved with
 the preset (`[modulation.<name>]` in `preset.toml`). Neon Life ships with a breathing `glow`.
 
+## Rule explorer
+
+**Explore** opens a window with sixteen random Life-like rules (B/S notation) running live at
+low resolution. Click a thumbnail to load that rule as a new preset; **Shuffle** draws a new batch.
+Rules with no births or with B0 are skipped.
+
 ## Recording an animation
 
 **Image > Record animation…** captures a number of frames while the simulation plays and saves

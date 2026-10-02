@@ -1,5 +1,7 @@
 //! The egui application: wires the editors, params, transport and presets to the simulation.
 
+pub mod explorer;
+mod explorer_ui;
 pub mod modulation;
 pub mod mutate;
 pub mod state;
@@ -78,6 +80,9 @@ pub struct App {
     pub(crate) recording: Option<Recording>,
     /// Open Record dialog with its pending settings.
     pub(crate) record_dialog: Option<RecordingSettings>,
+    /// The rule explorer window, while open.
+    pub(crate) explorer: Option<explorer_ui::Explorer>,
+    render_state: eframe::egui_wgpu::RenderState,
 }
 
 impl App {
@@ -140,6 +145,8 @@ impl App {
             scrub: None,
             recording: None,
             record_dialog: None,
+            explorer: None,
+            render_state: rs.clone(),
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
@@ -499,6 +506,15 @@ impl App {
         self.capture_next_frame();
     }
 
+    pub(crate) fn toggle_explorer(&mut self) {
+        if self.explorer.is_some() {
+            self.explorer = None;
+        } else {
+            let seed = self.launched.elapsed().as_millis() as u64 ^ 0xC0FFEE;
+            self.explorer = Some(explorer_ui::Explorer::new(&self.render_state, seed));
+        }
+    }
+
     /// Opens the Record dialog with the last used settings, clamped to the memory budget.
     pub(crate) fn open_record_dialog(&mut self) {
         let mut s = RecordingSettings::default();
@@ -731,5 +747,6 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         ui_topbar::record_dialog(self, &ctx);
+        explorer_ui::window(self, &ctx);
     }
 }

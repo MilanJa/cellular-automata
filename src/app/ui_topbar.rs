@@ -74,6 +74,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let ctx = ui.ctx().clone();
             app.share(&ctx);
         }
+        if ui
+            .selectable_label(app.explorer.is_some(), "Explore")
+            .on_hover_text("A grid of random Life-like rules running live; click one to load it")
+            .clicked()
+        {
+            app.toggle_explorer();
+        }
         if !platform::is_web() && ui.button("Rescan").on_hover_text("Rescan ./presets").clicked() {
             app.rescan_presets();
         }
