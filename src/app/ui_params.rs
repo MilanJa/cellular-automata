@@ -41,7 +41,19 @@ fn param_widget(ui: &mut egui::Ui, spec: &ParamSpec, value: &mut ParamValue) -> 
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    ui.heading("Params");
+    ui.horizontal(|ui| {
+        ui.heading("Params");
+        if ui.button("Mutate").on_hover_text("Nudge every value a little").clicked() {
+            app.mutate();
+        }
+        if ui
+            .add_enabled(!app.state.undo.is_empty(), egui::Button::new("Undo"))
+            .on_hover_text("Restore the values from before the last Mutate")
+            .clicked()
+        {
+            app.undo_mutate();
+        }
+    });
     if app.state.specs.is_empty() {
         ui.label(
             egui::RichText::new("Declare params in a shader with `// @param name: f32 = 0.5 range 0 .. 1`")
@@ -118,9 +130,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.state.pending != before {
         app.state.modified = true;
     }
-    if ui.button("Apply grid settings & reset").clicked() {
-        app.apply_settings_and_reset();
-    }
+    ui.horizontal(|ui| {
+        if ui.button("Apply grid settings & reset").clicked() {
+            app.apply_settings_and_reset();
+        }
+        ui.checkbox(&mut app.state.auto_reseed, "auto-reseed when stuck")
+            .on_hover_text("Reset with a new seed after the grid has been static or periodic for 2 s");
+    });
 
     ui.separator();
     ui.heading("Brush");

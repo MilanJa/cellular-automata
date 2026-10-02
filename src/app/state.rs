@@ -117,6 +117,14 @@ pub struct AppState {
     /// Mouse brush: radius in cells and the value painted with the left button.
     pub brush_radius: f32,
     pub brush_value: [f32; 4],
+    /// Previous param values, most recent last, for Undo after Mutate.
+    pub undo: Vec<BTreeMap<String, ParamValue>>,
+    pub mutate_count: u64,
+    /// Recent statistics samples, oldest first.
+    pub stats: std::collections::VecDeque<crate::sim::stats::StatsSample>,
+    pub stuck: Option<crate::sim::stats::Stuck>,
+    pub stuck_since: Option<Instant>,
+    pub auto_reseed: bool,
 }
 
 impl AppState {
@@ -147,6 +155,12 @@ impl AppState {
             started: Instant::now(),
             brush_radius: 2.0,
             brush_value: [1.0, 0.0, 0.0, 1.0],
+            undo: Vec::new(),
+            mutate_count: 0,
+            stats: std::collections::VecDeque::new(),
+            stuck: None,
+            stuck_since: None,
+            auto_reseed: false,
         }
     }
 }

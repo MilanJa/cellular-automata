@@ -1,6 +1,7 @@
 //! The egui application: wires the editors, params, transport and presets to the simulation.
 
 pub mod modulation;
+pub mod mutate;
 pub mod state;
 mod ui_editor;
 mod ui_errors;
@@ -16,6 +17,8 @@ use crate::preset::Preset;
 use crate::shader::params::{pack_params, ParamValue};
 use crate::shader::validate::ShaderFile;
 use crate::app::modulation::modulated_values;
+use crate::app::mutate::mutate_values;
+use crate::sim::stats::detect_stuck;
 use crate::sim::paint::{pointer_to_cell, Stroke};
 use crate::sim::Simulation;
 use crate::viewport::show_viewport;
@@ -213,6 +216,7 @@ impl App {
         self.state.pending = sim.config().clone(); // reflect clamping
         drop(sim);
         self.state.started = web_time::Instant::now();
+        self.clear_stats();
     }
 
     /// Save in place when the preset already has a home; otherwise behave like Save As.
@@ -276,6 +280,62 @@ impl App {
             }
             Err(e) => self.report(format!("save failed: {e:#}")),
         }
+    }
+
+    /// Nudges every param; the previous values go on the undo stack.
+    pub(crate) fn mutate(&mut self) {
+        self.state.undo.push(self.state.values.clone());
+        if self.state.undo.len() > 20 {
+            self.state.undo.remove(0);
+        }
+        self.state.mutate_count += 1;
+        let seed = self.state.mutate_count ^ (self.launched.elapsed().as_millis() as u64);
+        self.state.values = mutate_values(&self.state.specs, &self.state.values, seed);
+        self.state.modified = true;
+        self.push_params();
+    }
+
+    pub(crate) fn undo_mutate(&mut self) {
+        if let Some(previous) = self.state.undo.pop() {
+            self.state.values = previous;
+            self.state.modified = true;
+            self.push_params();
+        }
+    }
+
+    /// Drains finished statistics, updates the history and the stuck detector, and reseeds when
+    /// asked to.
+    fn poll_stats(&mut self) {
+        let samples = self.sim.lock().unwrap().poll_stats();
+        if samples.is_empty() {
+            return;
+        }
+        for s in samples {
+            self.state.stats.push_back(s);
+        }
+        while self.state.stats.len() > 300 {
+            self.state.stats.pop_front();
+        }
+        let history: Vec<_> = self.state.stats.iter().copied().collect();
+        self.state.stuck = detect_stuck(&history, 48);
+        match (self.state.stuck, self.state.stuck_since) {
+            (Some(_), None) => self.state.stuck_since = Some(web_time::Instant::now()),
+            (None, _) => self.state.stuck_since = None,
+            _ => {}
+        }
+        if self.state.auto_reseed
+            && let Some(since) = self.state.stuck_since
+            && since.elapsed().as_secs_f32() > 2.0
+        {
+            self.state.pending.seed = self.state.pending.seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            self.apply_settings_and_reset();
+        }
+    }
+
+    pub(crate) fn clear_stats(&mut self) {
+        self.state.stats.clear();
+        self.state.stuck = None;
+        self.state.stuck_since = None;
     }
 
     /// Starts a PNG export of the current state at `scale` pixels per cell.
@@ -376,6 +436,7 @@ impl eframe::App for App {
         }
         self.poll_import();
         self.poll_export_image();
+        self.poll_stats();
         if self.modulation_active() {
             self.push_params();
         }

@@ -46,6 +46,9 @@ impl CallbackTrait for ViewportCallback {
             sim.paint(egui_encoder, &self.strokes);
         }
         sim.step(egui_encoder, self.steps);
+        if self.steps > 0 || !self.strokes.is_empty() {
+            sim.collect_stats(egui_encoder);
+        }
         Vec::new()
     }
 

@@ -111,6 +111,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if app.export_pending() {
             ui.label(egui::RichText::new("exporting image…").weak());
         }
+        stats_readout(app, ui);
     });
 }
 
@@ -159,5 +160,47 @@ pub fn save_dialog(app: &mut App, ctx: &egui::Context) {
         }
         Some(false) => app.save_dialog = None,
         None => {}
+    }
+}
+
+/// Population, change rate, a sparkline of the population history and the stuck badge.
+fn stats_readout(app: &App, ui: &mut egui::Ui) {
+    let Some(last) = app.state.stats.back() else { return };
+    let cells = {
+        let c = app.state.pending.clone();
+        (c.width as f32 * c.height as f32).max(1.0)
+    };
+    ui.separator();
+    ui.label(format!(
+        "pop {} ({:.1}%)   \u{394} {:.2}%",
+        last.population,
+        100.0 * last.population as f32 / cells,
+        100.0 * last.changed as f32 / cells
+    ));
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 16.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
+    let max = app.state.stats.iter().map(|s| s.population).max().unwrap_or(1).max(1) as f32;
+    let n = app.state.stats.len();
+    if n >= 2 {
+        let pts: Vec<egui::Pos2> = app
+            .state
+            .stats
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let x = rect.left() + rect.width() * i as f32 / (n - 1) as f32;
+                let y = rect.bottom() - (rect.height() - 2.0) * s.population as f32 / max - 1.0;
+                egui::pos2(x, y)
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 200, 255))));
+    }
+    if let Some(stuck) = app.state.stuck {
+        let text = match stuck {
+            crate::sim::stats::Stuck::Static => "stuck: static".to_string(),
+            crate::sim::stats::Stuck::Periodic(p) => format!("stuck: period {p}"),
+        };
+        ui.colored_label(egui::Color32::from_rgb(230, 170, 90), text);
     }
 }

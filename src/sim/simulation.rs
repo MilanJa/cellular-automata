@@ -13,6 +13,7 @@ use crate::sim::export::{
 };
 use crate::sim::init::generate_init;
 use crate::sim::paint::{brush_bbox, PaintUniform, Stroke, PAINT_WGSL};
+use crate::sim::stats::{StatsSample, STATS_WGSL};
 use crate::sim::row::{clamp_size, plan_row, RowPlan, WORKGROUP};
 use crate::sim::uniforms::{Globals, ParamsData};
 
@@ -33,6 +34,24 @@ struct Textures {
     render_bind_groups: [wgpu::BindGroup; 2],
     /// `[i]` writes `tex[i]` (mouse painting into the current state).
     paint_bind_groups: [wgpu::BindGroup; 2],
+    /// `[i]` reads `tex[i]` as current and `tex[1 - i]` as previous (statistics).
+    stats_bind_groups: [wgpu::BindGroup; 2],
+}
+
+/// One slot of the statistics readback pool.
+struct StatsSlot {
+    buffer: wgpu::Buffer,
+    state: StatsSlotState,
+    step: u32,
+    mapped: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatsSlotState {
+    Free,
+    /// Copy recorded this frame; map once the frame has been submitted.
+    Recorded,
+    Mapping,
 }
 
 pub struct Simulation {
@@ -45,6 +64,10 @@ pub struct Simulation {
     paint_layout: wgpu::BindGroupLayout,
     paint_pipeline: wgpu::ComputePipeline,
     paint_buf: wgpu::Buffer,
+    stats_layout: wgpu::BindGroupLayout,
+    stats_pipeline: wgpu::ComputePipeline,
+    stats_buf: wgpu::Buffer,
+    stats_slots: Vec<StatsSlot>,
     compute_pipeline_layout: wgpu::PipelineLayout,
     render_pipeline_layout: wgpu::PipelineLayout,
     globals_buf: wgpu::Buffer,
@@ -165,6 +188,77 @@ impl Simulation {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let stats_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ca stats layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let stats_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ca stats"),
+            source: wgpu::ShaderSource::Wgsl(STATS_WGSL.into()),
+        });
+        let stats_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ca stats pipeline layout"),
+            bind_group_layouts: &[Some(&stats_layout)],
+            immediate_size: 0,
+        });
+        let stats_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ca stats pipeline"),
+            layout: Some(&stats_pipeline_layout),
+            module: &stats_module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ca stats"),
+            size: 8,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let stats_slots = (0..3)
+            .map(|i| StatsSlot {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("ca stats readback {i}")),
+                    size: 8,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
+                state: StatsSlotState::Free,
+                step: 0,
+                mapped: Default::default(),
+            })
+            .collect();
         let compute_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("ca compute pipeline layout"),
@@ -201,9 +295,11 @@ impl Simulation {
             &compute_layout,
             &render_layout,
             &paint_layout,
+            &stats_layout,
             &globals_buf,
             &params_buf,
             &paint_buf,
+            &stats_buf,
             config.width,
             config.height,
         );
@@ -230,6 +326,10 @@ impl Simulation {
             paint_layout,
             paint_pipeline,
             paint_buf,
+            stats_layout,
+            stats_pipeline,
+            stats_buf,
+            stats_slots,
             compute_pipeline_layout,
             render_pipeline_layout,
             globals_buf,
@@ -390,9 +490,11 @@ impl Simulation {
                 &self.compute_layout,
                 &self.render_layout,
                 &self.paint_layout,
+                &self.stats_layout,
                 &self.globals_buf,
                 &self.params_buf,
                 &self.paint_buf,
+                &self.stats_buf,
                 config.width,
                 config.height,
             );
@@ -598,6 +700,69 @@ impl Simulation {
         }
     }
 
+    /// Records the statistics reduction for the current state into `encoder` and queues the
+    /// result for `poll_stats`. Skipped when every readback slot is busy.
+    pub fn collect_stats(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(slot) = self.stats_slots.iter_mut().find(|s| s.state == StatsSlotState::Free) else {
+            return;
+        };
+        encoder.clear_buffer(&self.stats_buf, 0, None);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ca stats"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.stats_pipeline);
+            pass.set_bind_group(0, &self.textures.stats_bind_groups[self.cur], &[]);
+            pass.dispatch_workgroups(
+                self.config.width.div_ceil(WORKGROUP),
+                self.config.height.div_ceil(WORKGROUP),
+                1,
+            );
+        }
+        encoder.copy_buffer_to_buffer(&self.stats_buf, 0, &slot.buffer, 0, 8);
+        slot.state = StatsSlotState::Recorded;
+        slot.step = self.globals.frame;
+    }
+
+    /// Advances the readback pool; call once per frame. Returns finished samples, oldest first.
+    pub fn poll_stats(&mut self) -> Vec<StatsSample> {
+        let mut out = Vec::new();
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let mut mapped_any = false;
+        for slot in &mut self.stats_slots {
+            match slot.state {
+                StatsSlotState::Free => {}
+                StatsSlotState::Recorded => {
+                    // The copy was submitted with the previous frame; the buffer can be mapped now.
+                    let flag = slot.mapped.clone();
+                    *flag.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    slot.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                        *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.is_ok());
+                    });
+                    slot.state = StatsSlotState::Mapping;
+                    mapped_any = true;
+                }
+                StatsSlotState::Mapping => {
+                    let done = slot.mapped.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(ok) = done {
+                        if ok && let Ok(view) = slot.buffer.slice(..).get_mapped_range() {
+                            let words: &[u32] = bytemuck::cast_slice(&view[..]);
+                            out.push(StatsSample { step: slot.step, population: words[0], changed: words[1] });
+                        }
+                        slot.buffer.unmap();
+                        slot.state = StatsSlotState::Free;
+                    }
+                }
+            }
+        }
+        if mapped_any {
+            let _ = self.device.poll(wgpu::PollType::Poll);
+        }
+        out.sort_by_key(|s| s.step);
+        out
+    }
+
     /// Records `n` simulation steps into `encoder`. With `n == 0` only the globals (notably
     /// `time`) are refreshed, so time-based render shaders keep moving while paused.
     pub fn step(&mut self, encoder: &mut wgpu::CommandEncoder, n: u32) {
@@ -731,9 +896,11 @@ fn create_textures(
     compute_layout: &wgpu::BindGroupLayout,
     render_layout: &wgpu::BindGroupLayout,
     paint_layout: &wgpu::BindGroupLayout,
+    stats_layout: &wgpu::BindGroupLayout,
     globals_buf: &wgpu::Buffer,
     params_buf: &wgpu::Buffer,
     paint_buf: &wgpu::Buffer,
+    stats_buf: &wgpu::Buffer,
     width: u32,
     height: u32,
 ) -> Textures {
@@ -799,10 +966,28 @@ fn create_textures(
             ],
         })
     };
+    let stats_bg = |cur: usize| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ca stats bg"),
+            layout: stats_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&views[cur]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&views[1 - cur]),
+                },
+                wgpu::BindGroupEntry { binding: 2, resource: stats_buf.as_entire_binding() },
+            ],
+        })
+    };
     let compute_bind_groups = [compute_bg(0), compute_bg(1)];
     let render_bind_groups = [render_bg(0), render_bg(1)];
     let paint_bind_groups = [paint_bg(0), paint_bg(1)];
-    Textures { tex, compute_bind_groups, render_bind_groups, paint_bind_groups }
+    let stats_bind_groups = [stats_bg(0), stats_bg(1)];
+    Textures { tex, compute_bind_groups, render_bind_groups, paint_bind_groups, stats_bind_groups }
 }
 
 /// GPU tests: need a real adapter, so they are `#[ignore]`d for CI. Run with
@@ -1038,6 +1223,39 @@ mod gpu_tests {
         assert_eq!(at(0, 0), 0.0);
         let painted = (0..32 * 32).filter(|i| data[i * 4] > 0.5).count();
         assert!((25..=37).contains(&painted), "about pi*r^2 cells: {painted}");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn stats_count_population_and_changes() {
+        let _gpu = gpu_lock();
+        let Some(mut sim) = sim_with(SimConfig {
+            mode: Mode::TwoD,
+            width: 32,
+            height: 32,
+            init: InitPattern::Blank,
+            seed: 1,
+        }) else {
+            return;
+        };
+        // Paint a disc into the current texture; the other texture stays blank, so every
+        // painted cell also counts as changed.
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        sim.paint(&mut enc, &[Stroke { x: 16, y: 16, radius: 3.0, value: [1.0, 0.0, 0.0, 1.0] }]);
+        sim.collect_stats(&mut enc);
+        sim.queue.submit([enc.finish()]);
+        let painted = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count() as u32;
+        let mut samples = Vec::new();
+        for _ in 0..50 {
+            samples.extend(sim.poll_stats());
+            if !samples.is_empty() {
+                break;
+            }
+            let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let s = samples.first().expect("a stats sample");
+        assert_eq!(s.population, painted);
+        assert_eq!(s.changed, painted);
     }
 
     #[test]
