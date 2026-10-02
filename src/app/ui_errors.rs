@@ -7,7 +7,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         } else {
             "no pipeline yet"
         };
-        ui.label(egui::RichText::new(msg).weak());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(msg).weak());
+            super::ui_topbar::stats_readout(app, ui);
+        });
         return;
     }
     egui::ScrollArea::vertical().show(ui, |ui| {

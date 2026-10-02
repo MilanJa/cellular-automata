@@ -111,7 +111,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if app.export_pending() {
             ui.label(egui::RichText::new("exporting image…").weak());
         }
-        stats_readout(app, ui);
     });
 }
 
@@ -164,7 +163,7 @@ pub fn save_dialog(app: &mut App, ctx: &egui::Context) {
 }
 
 /// Population, change rate, a sparkline of the population history and the stuck badge.
-fn stats_readout(app: &App, ui: &mut egui::Ui) {
+pub fn stats_readout(app: &App, ui: &mut egui::Ui) {
     let Some(last) = app.state.stats.back() else { return };
     let cells = {
         let c = app.state.pending.clone();
