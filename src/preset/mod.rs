@@ -108,6 +108,30 @@ pub fn param_value_to_toml(v: &ParamValue) -> toml::Value {
     }
 }
 
+/// Folder-safe name for a preset: lowercase ASCII letters and digits, runs of anything else
+/// collapsed to one `_`. Falls back to `preset` when nothing usable is left.
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    let mut pending_sep = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending_sep && !out.is_empty() {
+                out.push('_');
+            }
+            pending_sep = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            pending_sep = true;
+        }
+    }
+    if out.is_empty() { "preset".to_string() } else { out }
+}
+
+/// True when `dir` already holds a preset.
+pub fn preset_exists(dir: &Path) -> bool {
+    dir.join("preset.toml").is_file()
+}
+
 /// Lists `(name, folder)` for every loadable preset folder directly under `dir`, sorted by name.
 pub fn scan_presets_dir(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -248,5 +272,23 @@ mod tests {
         let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["Alpha", "Bravo"]);
         assert!(scan_presets_dir(Path::new("nope")).is_empty());
+    }
+
+    #[test]
+    fn slug_makes_safe_folder_names() {
+        assert_eq!(slug("Game of Life"), "game_of_life");
+        assert_eq!(slug("Gray-Scott Reaction-Diffusion"), "gray_scott_reaction_diffusion");
+        assert_eq!(slug("  Rule 30!! "), "rule_30");
+        assert_eq!(slug("___"), "preset");
+        assert_eq!(slug(""), "preset");
+        assert_eq!(slug("caf\u{e9} ☕"), "caf");
+    }
+
+    #[test]
+    fn preset_exists_checks_for_preset_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!preset_exists(dir.path()));
+        sample().save_dir(dir.path()).unwrap();
+        assert!(preset_exists(dir.path()));
     }
 }

@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::preset::builtin::{load_builtin, BUILTINS};
-use crate::preset::{scan_presets_dir, Preset};
+use crate::preset::{preset_exists, scan_presets_dir, slug, Preset};
 use crate::shader::params::pack_params;
 use crate::shader::validate::{ShaderError, ShaderFile};
 use crate::sim::Simulation;
@@ -153,12 +153,29 @@ impl App {
         }
     }
 
+    /// Asks for a parent folder and saves into `<parent>/<slug(name)>/`, confirming first when
+    /// that folder already holds a preset.
     pub(crate) fn save_as(&mut self) {
-        if let Some(dir) =
-            rfd::FileDialog::new().set_title("Choose a folder for this preset").pick_folder()
-        {
-            self.save_to(&dir);
+        let Some(parent) =
+            rfd::FileDialog::new().set_title("Choose where to create the preset folder").pick_folder()
+        else {
+            return;
+        };
+        let target = parent.join(slug(&self.state.preset_name));
+        if preset_exists(&target) {
+            let answer = rfd::MessageDialog::new()
+                .set_title("Overwrite preset?")
+                .set_description(format!(
+                    "{} already contains a preset. Overwrite it?",
+                    target.display()
+                ))
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+            if answer != rfd::MessageDialogResult::Yes {
+                return;
+            }
         }
+        self.save_to(&target);
     }
 
     fn save_to(&mut self, dir: &Path) {
