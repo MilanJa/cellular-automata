@@ -1,4 +1,5 @@
 // Gray-Scott reaction-diffusion. r = U, g = V. Init: random cells seed V.
+// laplacian(x, y) is the 9-point Laplacian of the neighbourhood.
 // @param feed: f32 = 0.037 range 0.0 .. 0.1
 // @param kill: f32 = 0.06 range 0.0 .. 0.1
 // @param du: f32 = 0.2 range 0.0 .. 0.5
@@ -13,9 +14,7 @@ fn rule(pos: vec2<u32>) -> vec4<f32> {
         let v = c.r;
         return vec4<f32>(1.0 - v * 0.5, v, 0.0, 1.0);
     }
-    let lap = cell(x - 1, y) + cell(x + 1, y) + cell(x, y - 1) + cell(x, y + 1)
-        + 0.5 * (cell(x - 1, y - 1) + cell(x + 1, y - 1) + cell(x - 1, y + 1) + cell(x + 1, y + 1))
-        - 6.0 * c;
+    let lap = laplacian(x, y);
     let u = c.r;
     let v = c.g;
     let uvv = u * v * v;

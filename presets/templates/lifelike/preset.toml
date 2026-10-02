@@ -1,0 +1,12 @@
+name = "Life-like with B/S switches"
+mode = "2d"
+width = 256
+height = 256
+steps_per_frame = 1
+seed = 3
+
+[init]
+kind = "random"
+density = 0.4
+
+[params]

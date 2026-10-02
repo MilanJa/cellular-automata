@@ -15,21 +15,54 @@ Edit the **Rule** editor and press **Ctrl+Enter** (or click Apply). You write on
 
     fn rule(pos: vec2<u32>) -> vec4<f32>
 
-Each cell is an RGBA float texel; return its next state. Helpers in scope:
+Each cell is an RGBA float texel; return its next state. Helpers in scope (all read the
+previous generation, with wraparound at the edges):
 
-| Name | Meaning |
+| Rule helper | Meaning |
 |------|---------|
-| `cell(x, y)` | previous state at `(x, y)`, wrapping at the edges |
-| `prev_cell(x)` | 1D mode: the previous row at column `x` |
-| `rand(pos, salt)` | deterministic hash noise in `0..1`, seeded by the grid seed |
-| `hash(u)` | integer hash |
-| `globals.size`, `globals.frame`, `globals.time`, `globals.seed`, `globals.mode` | grid and clock |
+| `alive(x, y) -> bool` | is the cell on (`.r > 0.5`)? |
+| `neighbours(x, y) -> u32` | live cells among the 8 surrounding cells |
+| `neighbours4(x, y) -> u32` | live cells among the 4 orthogonal neighbours |
+| `cell(x, y) -> vec4<f32>` | the full previous value |
+| `moore_sum(x, y) -> vec4<f32>` | sum of the 8 neighbours |
+| `laplacian(x, y) -> vec4<f32>` | 9-point Laplacian, for diffusion |
+| `on()`, `off()`, `on_if(flag)` | the on / off cell values |
+| `prev_cell(x)`, `prev_alive(x)` | 1D mode: the previous row at column `x` |
+| `noise(pos) -> f32` | a random `0..1` per cell per step |
+| `rand(pos, salt)`, `hash(u)` | deterministic hashing |
+| `globals.size`, `.frame`, `.time`, `.seed`, `.mode` | grid and clock |
+
+Life in full:
+
+    fn rule(pos: vec2<u32>) -> vec4<f32> {
+        let x = i32(pos.x);
+        let y = i32(pos.y);
+        let n = neighbours(x, y);
+        let me = alive(x, y);
+        return on_if((me && (n == 2u || n == 3u)) || (!me && n == 3u));
+    }
 
 The **Render** editor maps a cell to a colour:
 
     fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32>
 
-It also has `cell(x, y)` and `globals`.
+| Render helper | Meaning |
+|------|---------|
+| `gray(t)`, `rgb(r, g, b)` | quick RGBA colours |
+| `hsv(h, s, v) -> vec3<f32>` | hue, saturation, value in `0..1` |
+| `palette(t) -> vec3<f32>` | a smooth gradient for `t` in `0..1` |
+| `cell_at(x, y)` | another cell's value, by grid coordinate |
+
+WGSL has no implicit numeric conversions: `pos.x` is `u32`, so write `f32(pos.x)` or
+`i32(pos.x) - 1`, and give integer literals a suffix (`3u`). When a shader fails to compile,
+the error panel shows the line and, for the common mistakes, a plain-language hint.
+
+## Starting from a template
+
+The **New ▾** menu creates an unsaved preset from a commented skeleton that runs as-is:
+*2D binary*, *Life-like with B/S switches* (no code, just checkboxes), *1D elementary*,
+*2D continuous* (diffusion with a reaction term), and *Render only* (Life with a render shader
+to play with). Edit, press Ctrl+Enter, then **Save as…** when you like the result.
 
 Compile errors show in the bottom panel with the line number in *your* source. Click an
 error to jump to it. The previous working shader keeps running until the new one compiles.

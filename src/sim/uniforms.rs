@@ -29,7 +29,7 @@ mod tests {
     }
 
     #[test]
-    fn params_data_is_256_bytes() {
-        assert_eq!(std::mem::size_of::<ParamsData>(), 256);
+    fn params_data_is_16_bytes_per_slot() {
+        assert_eq!(std::mem::size_of::<ParamsData>(), 16 * MAX_PARAMS);
     }
 }

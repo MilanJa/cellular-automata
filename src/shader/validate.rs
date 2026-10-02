@@ -1,6 +1,7 @@
 //! Validates assembled WGSL with naga and maps error locations back to the user's line numbers.
 
 use super::assemble::Assembled;
+use super::hints::hint_for;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShaderFile {
@@ -24,6 +25,8 @@ pub struct ShaderError {
     pub line: usize,
     pub column: usize,
     pub message: String,
+    /// Plain-language help for common mistakes, when the message is recognised.
+    pub hint: Option<String>,
 }
 
 fn map_location(
@@ -47,8 +50,32 @@ fn map_location(
         }
         None => (1, 1, false),
     };
+    let line_text = if in_prelude {
+        ""
+    } else {
+        assembled.source.lines().nth(assembled.user_line_offset + line - 1).unwrap_or("")
+    };
+    let hint = hint_for(&message, line_text);
     let message = if in_prelude { format!("{message} (in generated prelude)") } else { message };
-    ShaderError { file, line, column, message }
+    ShaderError { file, line, column, message, hint }
+}
+
+fn in_user_range(assembled: &Assembled, loc: &naga::SourceLocation) -> bool {
+    let abs = loc.line_number as usize;
+    abs > assembled.user_line_offset && abs <= assembled.user_line_offset + assembled.user_line_count
+}
+
+/// Picks the most useful location: the first (parse) or last (validation) span that falls in
+/// the user's lines, else the last span overall.
+fn pick_location(
+    assembled: &Assembled,
+    locs: impl Iterator<Item = naga::SourceLocation>,
+    prefer_last: bool,
+) -> Option<naga::SourceLocation> {
+    let locs: Vec<_> = locs.collect();
+    let mut in_range = locs.iter().filter(|l| in_user_range(assembled, l));
+    let chosen = if prefer_last { in_range.next_back() } else { in_range.next() };
+    chosen.or(locs.last()).copied()
 }
 
 /// Joins an error and its `source()` chain into one line, innermost cause last.
@@ -66,7 +93,12 @@ pub fn validate(file: ShaderFile, assembled: &Assembled) -> Result<naga::Module,
     let module = match naga::front::wgsl::parse_str(&assembled.source) {
         Ok(m) => m,
         Err(e) => {
-            let loc = e.location(&assembled.source);
+            let loc = pick_location(
+                assembled,
+                e.labels().map(|(span, _)| span.location(&assembled.source)),
+                false,
+            )
+            .or_else(|| e.location(&assembled.source));
             return Err(vec![map_location(file, assembled, loc, e.message().to_string())]);
         }
     };
@@ -82,11 +114,12 @@ pub fn validate(file: ShaderFile, assembled: &Assembled) -> Result<naga::Module,
         Err(e) => {
             // The innermost span is the most specific (the offending expression), while the
             // outermost usually just points at the enclosing function.
-            let loc = e
-                .spans()
-                .last()
-                .map(|(span, _)| span.location(&assembled.source))
-                .or_else(|| e.location(&assembled.source));
+            let loc = pick_location(
+                assembled,
+                e.spans().map(|(span, _)| span.location(&assembled.source)),
+                true,
+            )
+            .or_else(|| e.location(&assembled.source));
             let message = error_chain(e.as_inner());
             Err(vec![map_location(file, assembled, loc, message)])
         }
@@ -146,5 +179,21 @@ mod tests {
         let user = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let d: f64 = 1.0lf;\n    return vec4<f32>(f32(d));\n}\n";
         let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
         assert_eq!(errs[0].line, 2, "{:?}", errs[0]);
+    }
+
+    #[test]
+    fn return_type_mismatch_points_at_the_user_return_line() {
+        let user = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    return 1.0;\n}\n";
+        let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
+        assert_eq!(errs[0].line, 2, "{:?}", errs[0]);
+        assert!(!errs[0].message.contains("generated prelude"), "{:?}", errs[0]);
+    }
+
+    #[test]
+    fn hints_are_attached_to_errors() {
+        let user = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let x: f32 = pos.x * 2.0;\n    return vec4<f32>(x);\n}\n";
+        let errs = validate(ShaderFile::Rule, &assemble_rule(user, &params_wgsl(&[]))).unwrap_err();
+        let hint = errs[0].hint.as_deref().expect("hint for numeric type mix");
+        assert!(hint.contains("f32("), "{hint}");
     }
 }

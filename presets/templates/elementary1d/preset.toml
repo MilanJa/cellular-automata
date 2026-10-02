@@ -1,0 +1,11 @@
+name = "1D elementary"
+mode = "1d"
+width = 512
+height = 256
+steps_per_frame = 1
+seed = 1
+
+[init]
+kind = "single"
+
+[params]

@@ -1,0 +1,12 @@
+name = "2D continuous"
+mode = "2d"
+width = 256
+height = 256
+steps_per_frame = 4
+seed = 5
+
+[init]
+kind = "random"
+density = 0.05
+
+[params]

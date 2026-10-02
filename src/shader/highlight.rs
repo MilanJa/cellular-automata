@@ -33,7 +33,9 @@ const BUILTINS: &[&str] = &[
     "textureLoad", "textureStore", "select", "clamp", "min", "max", "abs", "floor", "ceil",
     "fract", "round", "sin", "cos", "tan", "atan2", "exp", "log", "pow", "sqrt", "dot", "cross",
     "length", "normalize", "distance", "mix", "smoothstep", "step", "sign", "any", "all",
-    "cell", "prev_cell", "hash", "rand", "wrap",
+    "cell", "prev_cell", "hash", "rand", "wrap", "noise", "alive", "prev_alive", "neighbours",
+    "neighbours4", "moore_sum", "laplacian", "on", "off", "on_if", "gray", "rgb", "hsv", "palette",
+    "cell_at",
 ];
 
 fn is_ident_start(c: char) -> bool {

@@ -1,5 +1,5 @@
-// Conway's Game of Life. r = alive (0/1), g = age in steps (for colouring).
-// neighbours(x, y) counts the live cells among the 8 around (x, y).
+// This template keeps Game of Life as the rule so you can focus on the Render editor.
+// .r = alive, .g = age in steps.
 
 fn rule(pos: vec2<u32>) -> vec4<f32> {
     let x = i32(pos.x);

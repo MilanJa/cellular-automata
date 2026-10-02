@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-pub const MAX_PARAMS: usize = 16;
+pub const MAX_PARAMS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamType {
@@ -125,6 +125,8 @@ const RESERVED_NAMES: &[&str] = &[
     "bool", "f16", "f32", "i32", "u32", "vec2", "vec3", "vec4", "mat2x2", "mat3x3", "mat4x4",
     "array", "atomic", "ptr", "sampler", "texture_2d", "texture_storage_2d",
     "params", "globals", "src", "dst", "state", "cell", "prev_cell", "hash", "rand", "wrap",
+    "noise", "alive", "prev_alive", "neighbours", "neighbours4", "moore_sum", "laplacian", "on",
+    "off", "on_if", "gray", "rgb", "hsv", "palette", "cell_at",
     "rule", "shade", "main", "vs_main", "fs_main", "Globals", "Params", "VsOut", "_unused",
 ];
 
@@ -289,7 +291,7 @@ mod tests {
     fn parses_i32_bool_and_vectors() {
         let src = "\
 // @param n: i32 = 3 range 0 .. 8
-// @param on: bool = true
+// @param enabled: bool = true
 // @param uv: vec2<f32> = (0.1, 0.2)
 // @param col: vec3<f32> = (1.0, 0.5, 0.2) color
 // @param q: vec4<f32> = (1, 2, 3, 4)
@@ -331,7 +333,7 @@ mod tests {
 
     #[test]
     fn rejects_more_than_max_params() {
-        let src: String = (0..17).map(|i| format!("// @param p{i}: f32 = 0\n")).collect();
+        let src: String = (0..=MAX_PARAMS).map(|i| format!("// @param p{i}: f32 = 0\n")).collect();
         assert!(parse_params(&src).is_err());
     }
 

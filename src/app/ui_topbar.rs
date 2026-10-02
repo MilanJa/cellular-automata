@@ -1,6 +1,6 @@
 use super::state::PresetSource;
 use super::App;
-use crate::preset::builtin::{load_builtin, BUILTINS};
+use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
 use crate::preset::Preset;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -40,6 +40,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         if let Some(msg) = load_error {
             app.report(msg);
+        }
+        let mut new_template: Option<usize> = None;
+        ui.menu_button("New ▾", |ui| {
+            ui.label(egui::RichText::new("Start from a commented template").small().weak());
+            for (i, t) in TEMPLATES.iter().enumerate() {
+                let name = load_builtin(t).meta.name;
+                if ui.button(name).clicked() {
+                    new_template = Some(i);
+                    ui.close();
+                }
+            }
+        });
+        if let Some(i) = new_template {
+            app.load_template(i);
         }
         if ui.button("Save").on_hover_text("Save to this preset's folder (built-ins: Save As)").clicked() {
             app.save();

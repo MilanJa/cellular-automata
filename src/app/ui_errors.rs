@@ -24,6 +24,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.label(rich);
                 }
             }
+            if let super::state::Diagnostic::Shader(e) = &d
+                && let Some(h) = &e.hint
+            {
+                ui.label(egui::RichText::new(format!("   ↳ {h}")).weak());
+            }
         }
     });
 }

@@ -269,6 +269,7 @@ impl Simulation {
                 line: 1,
                 column: 1,
                 message: format!("GPU backend rejected shader: {e}"),
+                hint: None,
             }]),
         }
     }
@@ -691,6 +692,28 @@ mod gpu_tests {
             sim.set_pipelines(&rule, &render).unwrap();
             assert!(step_and_check(&mut sim, h + 7).is_none(), "height {h}: validation error");
         }
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn lifelike_template_runs_and_keeps_live_cells() {
+        let _gpu = gpu_lock();
+        let t = load_builtin(&crate::preset::builtin::TEMPLATES[1]);
+        let (rule, render) = assembled_for(&t.rule, &t.render);
+        let Some(mut sim) = sim_with(SimConfig {
+            mode: Mode::TwoD,
+            width: 64,
+            height: 64,
+            init: InitPattern::Random { density: 0.4 },
+            seed: 3,
+        }) else {
+            return;
+        };
+        sim.set_pipelines(&rule, &render).unwrap();
+        upload_default_params(&mut sim, &t.rule, &t.render);
+        assert!(step_and_check(&mut sim, 10).is_none());
+        let live = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
+        assert!(live > 0, "B3/S23 from a 40% random soup should still have live cells after 10 steps");
     }
 
     #[test]

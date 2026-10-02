@@ -1,0 +1,12 @@
+name = "Life-like (B/S)"
+mode = "2d"
+width = 512
+height = 512
+steps_per_frame = 1
+seed = 7
+
+[init]
+kind = "random"
+density = 0.4
+
+[params]

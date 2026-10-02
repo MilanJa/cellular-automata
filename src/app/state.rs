@@ -19,6 +19,7 @@ pub const MAX_GRID_SIZE: u32 = 4096;
 #[derive(Debug, Clone, PartialEq)]
 pub enum PresetSource {
     Builtin(usize),
+    Template(usize),
     Disk(PathBuf),
 }
 
@@ -173,7 +174,7 @@ impl RateMeter {
 }
 
 fn param_err(file: ShaderFile, e: ParamError) -> ShaderError {
-    ShaderError { file, line: e.line.max(1), column: 1, message: e.message }
+    ShaderError { file, line: e.line.max(1), column: 1, message: e.message, hint: None }
 }
 
 /// Parses params from both editors, merges them, assembles and validates both shaders.
@@ -414,13 +415,13 @@ mod tests {
 
     #[test]
     fn diagnostic_text_and_location() {
-        let d = Diagnostic::Shader(ShaderError { file: ShaderFile::Render, line: 3, column: 7, message: "boom".into() });
+        let d = Diagnostic::Shader(ShaderError { file: ShaderFile::Render, line: 3, column: 7, message: "boom".into(), hint: None });
         assert_eq!(d.text(), "render.wgsl:3:7  boom");
         assert_eq!(d.location(), Some((ShaderFile::Render, 3)));
         let g = Diagnostic::General("save failed".into());
         assert_eq!(g.text(), "save failed");
         assert_eq!(g.location(), None);
-        let list = diagnostics_from(vec![ShaderError { file: ShaderFile::Rule, line: 1, column: 1, message: "x".into() }]);
+        let list = diagnostics_from(vec![ShaderError { file: ShaderFile::Rule, line: 1, column: 1, message: "x".into(), hint: None }]);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].location(), Some((ShaderFile::Rule, 1)));
     }

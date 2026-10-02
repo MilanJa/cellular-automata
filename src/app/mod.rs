@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::preset::builtin::{load_builtin, BUILTINS};
+use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
 use crate::preset::{preset_exists, scan_presets_dir, slug, Preset};
 use crate::shader::params::pack_params;
 use crate::shader::validate::ShaderFile;
@@ -116,6 +116,15 @@ impl App {
         self.state.modified = false;
         self.state.started = std::time::Instant::now();
         self.push_params();
+    }
+
+    /// Starts a new, unsaved preset from one of the embedded templates.
+    pub(crate) fn load_template(&mut self, index: usize) {
+        let Some(t) = TEMPLATES.get(index) else { return };
+        let mut preset = load_builtin(t);
+        preset.meta.name = format!("Untitled ({})", preset.meta.name);
+        self.load_preset(preset, PresetSource::Template(index));
+        self.state.modified = true;
     }
 
     pub(crate) fn apply_shaders(&mut self) {

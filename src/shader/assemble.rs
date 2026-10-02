@@ -52,6 +52,64 @@ fn rand(pos: vec2<u32>, salt: u32) -> f32 {
     return f32(h) / 4294967295.0;
 }
 
+// A fresh random number per cell per step.
+fn noise(pos: vec2<u32>) -> f32 {
+    return rand(pos, globals.frame);
+}
+
+fn alive(x: i32, y: i32) -> bool {
+    return cell(x, y).r > 0.5;
+}
+
+fn prev_alive(x: i32) -> bool {
+    return prev_cell(x).r > 0.5;
+}
+
+// Number of live cells among the 8 neighbours (Moore neighbourhood).
+fn neighbours(x: i32, y: i32) -> u32 {
+    var n = 0u;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            if (dx != 0 || dy != 0) {
+                n += u32(alive(x + dx, y + dy));
+            }
+        }
+    }
+    return n;
+}
+
+// Number of live cells among the 4 orthogonal neighbours (von Neumann neighbourhood).
+fn neighbours4(x: i32, y: i32) -> u32 {
+    return u32(alive(x - 1, y)) + u32(alive(x + 1, y)) + u32(alive(x, y - 1)) + u32(alive(x, y + 1));
+}
+
+// Sum of the 8 neighbours' values.
+fn moore_sum(x: i32, y: i32) -> vec4<f32> {
+    return cell(x - 1, y - 1) + cell(x, y - 1) + cell(x + 1, y - 1)
+        + cell(x - 1, y) + cell(x + 1, y)
+        + cell(x - 1, y + 1) + cell(x, y + 1) + cell(x + 1, y + 1);
+}
+
+// 9-point Laplacian: how much a cell differs from its surroundings.
+fn laplacian(x: i32, y: i32) -> vec4<f32> {
+    return cell(x - 1, y) + cell(x + 1, y) + cell(x, y - 1) + cell(x, y + 1)
+        + 0.5 * (cell(x - 1, y - 1) + cell(x + 1, y - 1) + cell(x - 1, y + 1) + cell(x + 1, y + 1))
+        - 6.0 * cell(x, y);
+}
+
+fn on() -> vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+
+fn off() -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+// on() when `v` is true, off() otherwise.
+fn on_if(v: bool) -> vec4<f32> {
+    return select(off(), on(), v);
+}
+
 // ---- user rule ----
 "#;
 
@@ -79,6 +137,32 @@ fn cell(x: i32, y: i32) -> vec4<f32> {
     let xx = u32(((x % w) + w) % w);
     let yy = u32(((y % h) + h) % h);
     return textureLoad(state, vec2<u32>(xx, yy), 0);
+}
+
+// Neighbouring cell by grid coordinate (the `cell` parameter of `shade` shadows `cell()`).
+fn cell_at(x: i32, y: i32) -> vec4<f32> {
+    return cell(x, y);
+}
+
+fn gray(t: f32) -> vec4<f32> {
+    return vec4<f32>(vec3<f32>(clamp(t, 0.0, 1.0)), 1.0);
+}
+
+fn rgb(r: f32, g: f32, b: f32) -> vec4<f32> {
+    return vec4<f32>(r, g, b, 1.0);
+}
+
+// Hue, saturation and value in 0..1.
+fn hsv(h: f32, s: f32, v: f32) -> vec3<f32> {
+    let k = vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
+    let p = abs(fract(vec3<f32>(h) + k) * 6.0 - vec3<f32>(3.0));
+    return v * mix(vec3<f32>(1.0), clamp(p - vec3<f32>(1.0), vec3<f32>(0.0), vec3<f32>(1.0)), s);
+}
+
+// A smooth gradient for t in 0..1 (cosine palette).
+fn palette(t: f32) -> vec3<f32> {
+    let tt = clamp(t, 0.0, 1.0);
+    return vec3<f32>(0.5) + vec3<f32>(0.5) * cos(6.28318 * (tt + vec3<f32>(0.0, 0.33, 0.67)));
 }
 
 // ---- user render ----
