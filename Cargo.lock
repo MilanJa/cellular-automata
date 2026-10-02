@@ -653,6 +653,7 @@ dependencies = [
  "js-sys",
  "log",
  "naga",
+ "png",
  "pollster 1.0.1",
  "rand",
  "rand_chacha",

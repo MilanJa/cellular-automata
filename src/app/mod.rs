@@ -247,6 +247,34 @@ impl App {
         }
     }
 
+    /// Starts a PNG export of the current state at `scale` pixels per cell.
+    pub(crate) fn export_image(&mut self, scale: u32) {
+        let mut sim = self.sim.lock().unwrap();
+        let filename = crate::sim::export::image_filename(&self.state.preset_name, sim.frame());
+        let result = sim.start_export(scale, filename);
+        drop(sim);
+        if let Err(e) = result {
+            self.report(e);
+        }
+    }
+
+    fn poll_export_image(&mut self) {
+        let result = self.sim.lock().unwrap().poll_export();
+        match result {
+            None => {}
+            Some(Err(e)) => self.report(e),
+            Some(Ok(img)) => {
+                if let Err(e) = platform::save_png(&img.filename, &img.png) {
+                    self.report(format!("could not save image: {e:#}"));
+                }
+            }
+        }
+    }
+
+    pub(crate) fn export_pending(&self) -> bool {
+        self.sim.lock().unwrap().export_pending()
+    }
+
     pub(crate) fn export(&mut self) {
         let preset = state_to_preset(&self.state);
         if let Err(e) = platform::export_bundle(&preset) {
@@ -289,6 +317,7 @@ impl eframe::App for App {
             self.report(format!("{message}. Restart the application to continue."));
         }
         self.poll_import();
+        self.poll_export_image();
         ui_topbar::save_dialog(self, &ctx);
         // Global shortcut: Ctrl/Cmd+Enter applies shaders. Consume it before the editors see it.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
@@ -324,7 +353,7 @@ impl eframe::App for App {
             show_viewport(ui, &self.sim, steps, time);
         });
 
-        if self.state.playing {
+        if self.state.playing || self.export_pending() {
             ctx.request_repaint();
         }
     }

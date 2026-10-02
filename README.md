@@ -96,6 +96,12 @@ A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`. Fo
 a preset's folder; **Save as…** picks a new folder. Built-ins: Rule 30, Rule 110, Game of
 Life, Gray-Scott reaction-diffusion.
 
+## Exporting an image
+
+**Image → 1× / 2× / 4×** saves the current grid as a lossless PNG, coloured by the render shader,
+at one, two or four pixels per cell (no UI, no letterbox). The desktop asks where to save; the
+browser downloads `<preset>-step<N>.png`.
+
 ## Controls
 
 | Control | Action |

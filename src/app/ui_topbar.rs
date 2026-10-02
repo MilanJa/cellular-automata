@@ -73,6 +73,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if !platform::is_web() && ui.button("Rescan").on_hover_text("Rescan ./presets").clicked() {
             app.rescan_presets();
         }
+        let mut export_scale: Option<u32> = None;
+        ui.menu_button("Image", |ui| {
+            ui.label(egui::RichText::new("Save the grid as a PNG, pixels per cell:").small().weak());
+            for s in [1u32, 2, 4] {
+                if ui.button(format!("{s}×")).clicked() {
+                    export_scale = Some(s);
+                    ui.close();
+                }
+            }
+        });
+        if let Some(s) = export_scale {
+            app.export_image(s);
+        }
 
         ui.separator();
         let play_label = if app.state.playing { "⏸ Pause" } else { "▶ Play" };
@@ -95,6 +108,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let steps_per_sec = app.rate.update(web_time::Instant::now(), frame);
         let dt = ui.input(|i| i.stable_dt).max(1e-6);
         ui.label(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt));
+        if app.export_pending() {
+            ui.label(egui::RichText::new("exporting image…").weak());
+        }
     });
 }
 

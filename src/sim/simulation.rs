@@ -8,6 +8,9 @@ use crate::preset::{InitPattern, Mode};
 use crate::shader::assemble::Assembled;
 use crate::shader::params::MAX_PARAMS;
 use crate::shader::validate::{validate, ShaderError, ShaderFile};
+use crate::sim::export::{
+    clamp_scale, encode_png, padded_bytes_per_row, to_rgba, unpad_rows, ExportedImage,
+};
 use crate::sim::init::generate_init;
 use crate::sim::row::{clamp_size, plan_row, RowPlan, WORKGROUP};
 use crate::sim::uniforms::{Globals, ParamsData};
@@ -48,6 +51,18 @@ pub struct Simulation {
     globals: Globals,
     /// Set by wgpu's device-lost callback; drained by the app once per frame.
     device_lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    export: Option<PendingExport>,
+}
+
+/// An offscreen render that has been submitted and whose readback buffer is being mapped.
+struct PendingExport {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bpr: u32,
+    filename: String,
+    /// `Some(ok)` once the map callback ran.
+    mapped: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
 }
 
 impl Simulation {
@@ -175,9 +190,125 @@ impl Simulation {
             render: None,
             globals,
             device_lost,
+            export: None,
         };
         sim.reset();
         sim
+    }
+
+    pub fn export_pending(&self) -> bool {
+        self.export.is_some()
+    }
+
+    /// Renders the current state at `scale` pixels per cell into an offscreen texture and starts
+    /// reading it back. The result arrives through `poll_export` on a later frame.
+    pub fn start_export(&mut self, scale: u32, filename: String) -> Result<(), String> {
+        if self.export.is_some() {
+            return Err("an image export is already in progress".into());
+        }
+        let Some(pipeline) = &self.render else {
+            return Err("no render pipeline: fix the shaders first".into());
+        };
+        let max_dim = self.device.limits().max_texture_dimension_2d;
+        let s = clamp_scale(scale, self.config.width, self.config.height, max_dim);
+        let (width, height) = (self.config.width * s, self.config.height * s);
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ca export target"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.target_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let padded_bpr = padded_bytes_per_row(width * 4);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ca export readback"),
+            size: (padded_bpr * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ca export"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ca export pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &self.textures.render_bind_groups[self.cur], &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bpr),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        let mapped = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let flag = mapped.clone();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.is_ok());
+        });
+        self.export = Some(PendingExport { buffer, width, height, padded_bpr, filename, mapped });
+        Ok(())
+    }
+
+    /// Call once per frame while an export is pending. Returns the PNG when the readback is done.
+    pub fn poll_export(&mut self) -> Option<Result<ExportedImage, String>> {
+        let state = self.export.as_ref()?.mapped.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let Some(ok) = state else {
+            // Give the mapping a chance to complete (a no-op in the browser, where it resolves
+            // from the event loop instead).
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            return None;
+        };
+        let pending = self.export.take()?;
+        if !ok {
+            return Some(Err("GPU readback failed".into()));
+        }
+        let result = (|| -> anyhow::Result<ExportedImage> {
+            let view = pending.buffer.slice(..).get_mapped_range()?;
+            let mut rgba = unpad_rows(
+                &view[..],
+                pending.padded_bpr as usize,
+                (pending.width * 4) as usize,
+                pending.height as usize,
+            );
+            drop(view);
+            pending.buffer.unmap();
+            to_rgba(&mut rgba, self.target_format);
+            let png = encode_png(pending.width, pending.height, &rgba)?;
+            Ok(ExportedImage { filename: pending.filename.clone(), png })
+        })();
+        Some(result.map_err(|e| format!("image export failed: {e:#}")))
     }
 
     /// Returns the device-lost message once, if the device was lost since the last call.
@@ -728,6 +859,46 @@ mod gpu_tests {
         assert!(step_and_check(&mut sim, 10).is_none());
         let live = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
         assert!(live > 0, "B3/S23 from a 40% random soup should still have live cells after 10 steps");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn export_produces_a_decodable_png_with_live_pixels() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let Some(mut sim) = sim_with(SimConfig {
+            mode: Mode::TwoD,
+            width: 16,
+            height: 16,
+            init: InitPattern::Random { density: 0.5 },
+            seed: 11,
+        }) else {
+            return;
+        };
+        sim.set_pipelines(&rule, &render).unwrap();
+        upload_default_params(&mut sim, &p.rule, &p.render);
+        assert!(step_and_check(&mut sim, 2).is_none());
+        sim.start_export(2, "life.png".into()).unwrap();
+        assert!(sim.export_pending());
+        let mut result = None;
+        for _ in 0..100 {
+            let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+            if let Some(r) = sim.poll_export() {
+                result = Some(r);
+                break;
+            }
+        }
+        let img = result.expect("export finished").expect("export ok");
+        assert_eq!(img.filename, "life.png");
+        let decoder = png::Decoder::new(std::io::Cursor::new(img.png));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height), (32, 32), "2x scale of a 16x16 grid");
+        let lit = buf[..info.buffer_size()].chunks(4).filter(|px| px[0] > 0 || px[1] > 0 || px[2] > 0).count();
+        assert!(lit > 0, "some cells must be coloured");
+        assert!(!sim.export_pending());
     }
 
     #[test]

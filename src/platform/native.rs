@@ -92,6 +92,20 @@ pub fn poll_import() -> Option<anyhow::Result<Preset>> {
     })
 }
 
+/// Asks where to save the PNG and writes it. `Ok(None)` when the user cancelled.
+pub fn save_png(filename: &str, bytes: &[u8]) -> anyhow::Result<Option<String>> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Save image")
+        .set_file_name(filename)
+        .add_filter("PNG image", &["png"])
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    std::fs::write(&path, bytes)?;
+    Ok(Some(path.display().to_string()))
+}
+
 /// The desktop has no URL; the startup preset comes from the command line instead.
 pub fn startup_preset_from_url() -> Option<String> {
     None

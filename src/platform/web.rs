@@ -78,13 +78,26 @@ pub fn delete_saved(location: &SavedLocation) {
 pub fn export_bundle(preset: &Preset) -> anyhow::Result<Option<String>> {
     let text = to_bundle(preset)?;
     let filename = bundle_filename(&preset.meta.name);
+    download(&filename, "application/toml", text.as_bytes())?;
+    Ok(Some(filename))
+}
+
+/// Downloads the PNG through the browser.
+pub fn save_png(filename: &str, bytes: &[u8]) -> anyhow::Result<Option<String>> {
+    download(filename, "image/png", bytes)?;
+    Ok(Some(filename.to_string()))
+}
+
+/// Triggers a browser download of `bytes` under `filename`.
+fn download(filename: &str, mime: &str, bytes: &[u8]) -> anyhow::Result<()> {
     let window = web_sys::window().ok_or_else(|| anyhow::anyhow!("no window"))?;
     let document = window.document().ok_or_else(|| anyhow::anyhow!("no document"))?;
+    let array = js_sys::Uint8Array::from(bytes);
     let parts = js_sys::Array::new();
-    parts.push(&JsValue::from_str(&text));
+    parts.push(&array.buffer());
     let opts = web_sys::BlobPropertyBag::new();
-    opts.set_type("application/toml");
-    let blob = web_sys::Blob::new_with_str_sequence_and_options(&parts, &opts)
+    opts.set_type(mime);
+    let blob = web_sys::Blob::new_with_buffer_source_sequence_and_options(&parts, &opts)
         .map_err(|_| anyhow::anyhow!("could not create blob"))?;
     let url = web_sys::Url::create_object_url_with_blob(&blob)
         .map_err(|_| anyhow::anyhow!("could not create object URL"))?;
@@ -94,10 +107,10 @@ pub fn export_bundle(preset: &Preset) -> anyhow::Result<Option<String>> {
         .dyn_into()
         .map_err(|_| anyhow::anyhow!("anchor cast failed"))?;
     a.set_href(&url);
-    a.set_download(&filename);
+    a.set_download(filename);
     a.click();
     let _ = web_sys::Url::revoke_object_url(&url);
-    Ok(Some(filename))
+    Ok(())
 }
 
 thread_local! {
