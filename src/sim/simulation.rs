@@ -8,9 +8,7 @@ use crate::preset::{InitPattern, Mode};
 use crate::shader::assemble::{Assembled, BLIT_WGSL};
 use crate::shader::params::MAX_PARAMS;
 use crate::shader::validate::{validate, ShaderError, ShaderFile};
-use crate::sim::export::{
-    clamp_scale, encode_png, padded_bytes_per_row, to_rgba, unpad_rows, ExportedImage,
-};
+use crate::sim::export::{clamp_scale, padded_bytes_per_row, to_rgba, unpad_rows, ExportedImage};
 use crate::sim::history::{
     should_snapshot, snapshot_capacity, SnapshotMeta, SnapshotRing, DEFAULT_BUDGET_BYTES,
     DEFAULT_INTERVAL, MAX_SNAPSHOTS,
@@ -589,8 +587,12 @@ impl Simulation {
             drop(view);
             pending.buffer.unmap();
             to_rgba(&mut rgba, self.target_format);
-            let png = encode_png(pending.width, pending.height, &rgba)?;
-            Ok(ExportedImage { filename: pending.filename.clone(), png })
+            Ok(ExportedImage {
+                filename: pending.filename.clone(),
+                width: pending.width,
+                height: pending.height,
+                rgba,
+            })
         })();
         Some(result.map_err(|e| format!("image export failed: {e:#}")))
     }
@@ -1563,7 +1565,8 @@ mod gpu_tests {
         }
         let img = result.expect("export finished").expect("export ok");
         assert_eq!(img.filename, "life.png");
-        let decoder = png::Decoder::new(std::io::Cursor::new(img.png));
+        assert_eq!((img.width, img.height), (32, 32));
+        let decoder = png::Decoder::new(std::io::Cursor::new(img.to_png().unwrap()));
         let mut reader = decoder.read_info().unwrap();
         let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut buf).unwrap();

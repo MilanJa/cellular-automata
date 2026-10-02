@@ -20,6 +20,7 @@ use crate::app::modulation::modulated_values;
 use crate::app::mutate::mutate_values;
 use crate::sim::stats::detect_stuck;
 use crate::sim::paint::{pointer_to_cell, Stroke};
+use crate::sim::record::{encode_apng, max_frames, recording_filename, RecordingSettings, FRAME_BUDGET_BYTES};
 use crate::sim::seed_image::{decode_png, image_to_cells, RgbaImage};
 use crate::sim::Simulation;
 use crate::viewport::show_viewport;
@@ -37,6 +38,13 @@ pub enum Start {
     Named(String),
     /// A preset decoded from a share link.
     Shared(Preset),
+}
+
+/// An animation being captured: frames arrive through the image export path.
+pub(crate) struct Recording {
+    pub settings: RecordingSettings,
+    pub frames: Vec<Vec<u8>>,
+    pub size: Option<(u32, u32)>,
 }
 
 /// The in-app "save to browser" prompt (the web has no folder picker).
@@ -67,6 +75,9 @@ pub struct App {
     pending_restore: Option<usize>,
     /// Timeline slider position while scrubbing; `None` follows the newest snapshot.
     pub(crate) scrub: Option<usize>,
+    pub(crate) recording: Option<Recording>,
+    /// Open Record dialog with its pending settings.
+    pub(crate) record_dialog: Option<RecordingSettings>,
 }
 
 impl App {
@@ -127,6 +138,8 @@ impl App {
             seed_image: None,
             pending_restore: None,
             scrub: None,
+            recording: None,
+            record_dialog: None,
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
@@ -464,12 +477,113 @@ impl App {
         let result = self.sim.lock().unwrap().poll_export();
         match result {
             None => {}
-            Some(Err(e)) => self.report(e),
+            Some(Err(e)) => {
+                self.recording = None;
+                self.report(e);
+            }
             Some(Ok(img)) => {
-                if let Err(e) = platform::save_png(&img.filename, &img.png) {
-                    self.report(format!("could not save image: {e:#}"));
+                if self.recording.is_some() {
+                    self.record_frame(img);
+                } else {
+                    match img.to_png() {
+                        Ok(png) => {
+                            if let Err(e) = platform::save_png(&img.filename, &png) {
+                                self.report(format!("could not save image: {e:#}"));
+                            }
+                        }
+                        Err(e) => self.report(format!("could not encode image: {e:#}")),
+                    }
                 }
             }
+        }
+        self.capture_next_frame();
+    }
+
+    /// Opens the Record dialog with the last used settings, clamped to the memory budget.
+    pub(crate) fn open_record_dialog(&mut self) {
+        let mut s = RecordingSettings::default();
+        let (w, h) = {
+            let sim = self.sim.lock().unwrap();
+            let c = sim.config();
+            (c.width, c.height)
+        };
+        s.frames = s.frames.min(max_frames(w * s.scale, h * s.scale, FRAME_BUDGET_BYTES));
+        self.record_dialog = Some(s);
+    }
+
+    pub(crate) fn start_recording(&mut self, settings: RecordingSettings) {
+        if self.recording.is_some() {
+            return;
+        }
+        self.record_dialog = None;
+        self.recording = Some(Recording { settings, frames: Vec::with_capacity(settings.frames as usize), size: None });
+        self.state.playing = true;
+        self.capture_next_frame();
+    }
+
+    pub(crate) fn stop_recording(&mut self) {
+        if let Some(rec) = self.recording.take()
+            && !rec.frames.is_empty()
+            && let Some((w, h)) = rec.size
+        {
+            self.finish_recording(w, h, &rec.frames, rec.settings.fps);
+        }
+    }
+
+    pub(crate) fn recording_progress(&self) -> Option<(usize, u32)> {
+        self.recording.as_ref().map(|r| (r.frames.len(), r.settings.frames))
+    }
+
+    /// Kicks off the capture of the next frame while a recording is active and no export is
+    /// already in flight.
+    fn capture_next_frame(&mut self) {
+        let Some(rec) = &self.recording else { return };
+        if rec.frames.len() as u32 >= rec.settings.frames {
+            return;
+        }
+        let scale = rec.settings.scale;
+        let mut sim = self.sim.lock().unwrap();
+        if sim.export_pending() {
+            return;
+        }
+        let result = sim.start_export(scale, "frame".into());
+        drop(sim);
+        if let Err(e) = result {
+            self.recording = None;
+            self.report(format!("recording stopped: {e}"));
+        }
+    }
+
+    fn record_frame(&mut self, img: crate::sim::export::ExportedImage) {
+        let Some(rec) = &mut self.recording else { return };
+        if rec.size.is_none() {
+            rec.size = Some((img.width, img.height));
+        }
+        if rec.size != Some((img.width, img.height)) {
+            // Grid or scale changed mid-recording: keep what we have.
+            let (w, h) = rec.size.unwrap_or((img.width, img.height));
+            let frames = std::mem::take(&mut rec.frames);
+            let fps = rec.settings.fps;
+            self.recording = None;
+            self.finish_recording(w, h, &frames, fps);
+            return;
+        }
+        rec.frames.push(img.rgba);
+        if rec.frames.len() as u32 >= rec.settings.frames {
+            let rec = self.recording.take().unwrap();
+            self.finish_recording(img.width, img.height, &rec.frames, rec.settings.fps);
+        }
+    }
+
+    fn finish_recording(&mut self, width: u32, height: u32, frames: &[Vec<u8>], fps: u16) {
+        match encode_apng(width, height, frames, fps) {
+            Ok(bytes) => {
+                let name = recording_filename(&self.state.preset_name);
+                if let Err(e) = platform::save_png(&name, &bytes) {
+                    self.report(format!("could not save animation: {e:#}"));
+                }
+            }
+            Err(e) => self.report(format!("could not encode animation: {e:#}")),
         }
     }
 
@@ -613,8 +727,9 @@ impl eframe::App for App {
             ui_topbar::timeline(self, ui);
         });
 
-        if self.state.playing || self.export_pending() || self.modulation_active() {
+        if self.state.playing || self.export_pending() || self.modulation_active() || self.recording.is_some() {
             ctx.request_repaint();
         }
+        ui_topbar::record_dialog(self, &ctx);
     }
 }

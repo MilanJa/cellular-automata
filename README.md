@@ -133,6 +133,14 @@ to it. By default the wave runs on the wall clock so a paused simulation still a
 *follow simulation* to make it pause with the simulation instead. Modulations are saved with
 the preset (`[modulation.<name>]` in `preset.toml`). Neon Life ships with a breathing `glow`.
 
+## Recording an animation
+
+**Image > Record animation…** captures a number of frames while the simulation plays and saves
+them as a looping animated PNG (APNG, which browsers and most viewers play). Choose pixels per
+cell, frame count and playback rate; frames are captured as fast as the GPU returns them and are
+buffered within a 256 MB budget. **Stop** in the status bar ends a recording early and keeps what
+was captured.
+
 ## Rewind
 
 The strip under the viewport is a timeline of snapshots, taken every *n* steps (choose *n* in

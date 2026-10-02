@@ -5,11 +5,19 @@ use eframe::wgpu;
 
 use crate::preset::slug;
 
-/// A finished export, ready to be written or downloaded.
+/// A finished export: RGBA8 pixels plus the suggested file name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportedImage {
     pub filename: String,
-    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl ExportedImage {
+    pub fn to_png(&self) -> anyhow::Result<Vec<u8>> {
+        encode_png(self.width, self.height, &self.rgba)
+    }
 }
 
 /// wgpu requires `bytes_per_row` of a texture-to-buffer copy to be a multiple of 256.

@@ -79,6 +79,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         let mut export_scale: Option<u32> = None;
         let mut seed_requested = false;
+        let mut record_requested = false;
         ui.menu_button("Image", |ui| {
             ui.label(egui::RichText::new("Save the grid as a PNG, pixels per cell:").small().weak());
             for s in [1u32, 2, 4] {
@@ -92,7 +93,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 seed_requested = true;
                 ui.close();
             }
+            if ui.button("Record animation…").on_hover_text("Capture frames into a looping animated PNG").clicked() {
+                record_requested = true;
+                ui.close();
+            }
         });
+        if record_requested {
+            app.open_record_dialog();
+        }
         if let Some(s) = export_scale {
             app.export_image(s);
         }
@@ -121,7 +129,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let steps_per_sec = app.rate.update(web_time::Instant::now(), frame);
         let dt = ui.input(|i| i.stable_dt).max(1e-6);
         ui.label(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt));
-        if app.export_pending() {
+        if let Some((done, total)) = app.recording_progress() {
+            ui.colored_label(egui::Color32::from_rgb(230, 90, 90), format!("● recording {done}/{total}"));
+            if ui.small_button("Stop").clicked() {
+                app.stop_recording();
+            }
+        } else if app.export_pending() {
             ui.label(egui::RichText::new("exporting image…").weak());
         }
     });
@@ -259,5 +272,63 @@ pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
     });
     if app.state.playing {
         app.scrub = None;
+    }
+}
+
+/// The Record dialog: frame count, scale and playback rate.
+pub fn record_dialog(app: &mut App, ctx: &egui::Context) {
+    let Some(mut settings) = app.record_dialog else { return };
+    let (w, h) = {
+        let sim = app.sim.lock().unwrap();
+        let c = sim.config();
+        (c.width, c.height)
+    };
+    let mut action: Option<bool> = None;
+    egui::Window::new("Record animation")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Frames are captured as fast as the GPU returns them while the simulation plays, \
+                     then written as a looping animated PNG.",
+                )
+                .weak(),
+            );
+            egui::Grid::new("record-settings").num_columns(2).show(ui, |ui| {
+                ui.label("pixels per cell");
+                ui.horizontal(|ui| {
+                    for s in [1u32, 2, 4] {
+                        ui.selectable_value(&mut settings.scale, s, format!("{s}×"));
+                    }
+                });
+                ui.end_row();
+                let cap = crate::sim::record::max_frames(w * settings.scale, h * settings.scale, crate::sim::record::FRAME_BUDGET_BYTES).min(3600);
+                settings.frames = settings.frames.clamp(1, cap);
+                ui.label("frames");
+                ui.add(egui::Slider::new(&mut settings.frames, 1..=cap).logarithmic(true));
+                ui.end_row();
+                ui.label("playback fps");
+                ui.add(egui::Slider::new(&mut settings.fps, 1..=60));
+                ui.end_row();
+                ui.label("image size");
+                ui.label(format!("{} × {} px, {:.0} MB buffered", w * settings.scale, h * settings.scale,
+                    (w * settings.scale) as f64 * (h * settings.scale) as f64 * 4.0 * settings.frames as f64 / 1e6));
+                ui.end_row();
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Start").clicked() {
+                    action = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    action = Some(false);
+                }
+            });
+        });
+    match action {
+        Some(true) => app.start_recording(settings),
+        Some(false) => app.record_dialog = None,
+        None => app.record_dialog = Some(settings),
     }
 }

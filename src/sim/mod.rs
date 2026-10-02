@@ -2,6 +2,7 @@ pub mod export;
 pub mod history;
 pub mod init;
 pub mod paint;
+pub mod record;
 pub mod row;
 pub mod seed_image;
 pub mod simulation;
