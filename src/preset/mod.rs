@@ -133,11 +133,17 @@ pub fn preset_exists(dir: &Path) -> bool {
 }
 
 /// Lists `(name, folder)` for every loadable preset folder directly under `dir`, sorted by name.
+/// Folders named after a built-in id are skipped: those are the embedded sources and already
+/// appear in the built-in list.
 pub fn scan_presets_dir(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let is_builtin_folder = |e: &std::fs::DirEntry| {
+        let name = e.file_name();
+        builtin::BUILTINS.iter().any(|b| name == b.id)
+    };
     let mut out: Vec<(String, PathBuf)> = entries
         .flatten()
-        .filter(|e| e.path().is_dir())
+        .filter(|e| e.path().is_dir() && !is_builtin_folder(e))
         .filter_map(|e| Preset::load_dir(&e.path()).ok().map(|p| (p.meta.name, e.path())))
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -290,5 +296,18 @@ mod tests {
         assert!(!preset_exists(dir.path()));
         sample().save_dir(dir.path()).unwrap();
         assert!(preset_exists(dir.path()));
+    }
+
+    #[test]
+    fn scan_skips_folders_named_after_builtins() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = sample();
+        a.meta.name = "Shadow".into();
+        a.save_dir(&dir.path().join("life")).unwrap();
+        let mut b = sample();
+        b.meta.name = "Mine".into();
+        b.save_dir(&dir.path().join("mine")).unwrap();
+        let names: Vec<String> = scan_presets_dir(dir.path()).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec!["Mine".to_string()]);
     }
 }
