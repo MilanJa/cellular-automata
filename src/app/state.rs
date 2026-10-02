@@ -138,6 +138,40 @@ impl AppState {
     }
 }
 
+/// Measures simulation steps per second from the step counter, sampling at most twice a second.
+#[derive(Debug, Clone)]
+pub struct RateMeter {
+    last_time: Instant,
+    last_frame: u32,
+    rate: f32,
+}
+
+impl RateMeter {
+    pub const WINDOW_SECS: f32 = 0.5;
+
+    pub fn new(now: Instant, frame: u32) -> Self {
+        RateMeter { last_time: now, last_frame: frame, rate: 0.0 }
+    }
+
+    /// Feeds the current step counter and returns the latest estimate.
+    pub fn update(&mut self, now: Instant, frame: u32) -> f32 {
+        if frame < self.last_frame {
+            // Counter went backwards (reset): start a new window.
+            self.last_time = now;
+            self.last_frame = frame;
+            self.rate = 0.0;
+            return self.rate;
+        }
+        let dt = now.saturating_duration_since(self.last_time).as_secs_f32();
+        if dt >= Self::WINDOW_SECS {
+            self.rate = (frame - self.last_frame) as f32 / dt;
+            self.last_time = now;
+            self.last_frame = frame;
+        }
+        self.rate
+    }
+}
+
 fn param_err(file: ShaderFile, e: ParamError) -> ShaderError {
     ShaderError { file, line: e.line.max(1), column: 1, message: e.message }
 }
@@ -401,5 +435,22 @@ mod tests {
         assert!(e.any_dirty());
         e.clear_dirty();
         assert!(!e.any_dirty());
+    }
+
+    #[test]
+    fn rate_meter_measures_steps_per_second_and_survives_resets() {
+        use std::time::Duration;
+        let t0 = Instant::now();
+        let mut m = RateMeter::new(t0, 0);
+        // Too soon: keeps the previous (zero) estimate.
+        assert_eq!(m.update(t0 + Duration::from_millis(100), 10), 0.0);
+        // After the sample window: 120 steps in 0.6 s = 200/s.
+        let r = m.update(t0 + Duration::from_millis(600), 120);
+        assert!((r - 200.0).abs() < 1e-3, "rate {r}");
+        // A reset drops the frame counter: no negative rates, estimate is reset.
+        let r = m.update(t0 + Duration::from_millis(1300), 5);
+        assert_eq!(r, 0.0);
+        let r = m.update(t0 + Duration::from_millis(1800), 55);
+        assert!((r - 100.0).abs() < 1e-3, "rate {r}");
     }
 }

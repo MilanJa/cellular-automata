@@ -69,7 +69,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
         ui.separator();
         let frame = app.sim.lock().unwrap().frame();
+        let steps_per_sec = app.rate.update(std::time::Instant::now(), frame);
         let dt = ui.input(|i| i.stable_dt).max(1e-6);
-        ui.label(format!("step {frame}   {:.0} fps", 1.0 / dt));
+        ui.label(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt));
     });
 }

@@ -18,7 +18,7 @@ use crate::sim::Simulation;
 use crate::viewport::show_viewport;
 use state::{
     build_shaders, diagnostics_from, prepare_preset_load, preset_to_state, resolve_values,
-    state_to_preset, AppState, Diagnostic, PresetSource,
+    state_to_preset, AppState, Diagnostic, PresetSource, RateMeter,
 };
 
 const PRESETS_DIR: &str = "presets";
@@ -29,6 +29,8 @@ pub struct App {
     state: AppState,
     /// Set when an error entry is clicked; the matching editor moves its cursor there.
     pending_cursor: Option<(ShaderFile, usize)>,
+    /// Steps-per-second meter for the status line.
+    pub(crate) rate: RateMeter,
 }
 
 impl App {
@@ -67,7 +69,12 @@ impl App {
             preset.meta.name.clone(),
             source,
         );
-        let mut app = App { sim: Arc::new(Mutex::new(sim)), state, pending_cursor: None };
+        let mut app = App {
+            sim: Arc::new(Mutex::new(sim)),
+            state,
+            pending_cursor: None,
+            rate: RateMeter::new(std::time::Instant::now(), 0),
+        };
         app.state.disk_presets = scan_presets_dir(Path::new(PRESETS_DIR));
         app.apply_shaders_with_toml(&toml_params);
         if let Some(msg) = start_error {
@@ -204,6 +211,11 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let lost = self.sim.lock().unwrap().take_device_lost();
+        if let Some(message) = lost {
+            self.state.playing = false;
+            self.report(format!("{message}. Restart the application to continue."));
+        }
         // Global shortcut: Ctrl/Cmd+Enter applies shaders. Consume it before the editors see it.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
             self.apply_shaders();
