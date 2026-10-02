@@ -70,6 +70,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if ui.button("Import").on_hover_text("Load a preset bundle file").clicked() {
             app.import();
         }
+        if ui.button("Share").on_hover_text("Copy a link that opens this exact scene in the web version").clicked() {
+            let ctx = ui.ctx().clone();
+            app.share(&ctx);
+        }
         if !platform::is_web() && ui.button("Rescan").on_hover_text("Rescan ./presets").clicked() {
             app.rescan_presets();
         }

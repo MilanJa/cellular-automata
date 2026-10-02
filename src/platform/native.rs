@@ -111,6 +111,16 @@ pub fn startup_preset_from_url() -> Option<String> {
     None
 }
 
+/// No URL fragment on the desktop.
+pub fn startup_share_code() -> Option<String> {
+    None
+}
+
+/// Links copied on the desktop point at the public web build.
+pub fn share_base_url() -> String {
+    crate::preset::share::PAGES_URL.to_string()
+}
+
 pub fn is_web() -> bool {
     false
 }

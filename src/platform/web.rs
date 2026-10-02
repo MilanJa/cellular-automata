@@ -157,6 +157,22 @@ pub fn startup_preset_from_url() -> Option<String> {
     super::preset_from_query(&search)
 }
 
+/// `#p=<code>` from the page URL.
+pub fn startup_share_code() -> Option<String> {
+    let hash = web_sys::window()?.location().hash().ok()?;
+    crate::preset::share::share_code_from_fragment(&hash)
+}
+
+/// This page without query or fragment.
+pub fn share_base_url() -> String {
+    let fallback = crate::preset::share::PAGES_URL.to_string();
+    let Some(loc) = web_sys::window().map(|w| w.location()) else { return fallback };
+    match (loc.origin(), loc.pathname()) {
+        (Ok(o), Ok(p)) => format!("{o}{p}"),
+        _ => fallback,
+    }
+}
+
 pub fn is_web() -> bool {
     true
 }

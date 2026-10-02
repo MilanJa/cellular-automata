@@ -59,15 +59,16 @@ fn main() {
             .expect("missing #ca_canvas")
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("#ca_canvas is not a canvas");
-        let start = cellular_automata::platform::startup_preset_from_url();
+        use cellular_automata::app::{App, Start};
+        use cellular_automata::platform;
+        let start = match platform::startup_share_code()
+            .and_then(|code| cellular_automata::preset::share::decode_share_code(&code).ok())
+        {
+            Some(preset) => Start::Shared(preset),
+            None => platform::startup_preset_from_url().map_or(Start::Default, Start::Named),
+        };
         let result = eframe::WebRunner::new()
-            .start(
-                canvas,
-                web_options,
-                Box::new(move |cc| {
-                    Ok(Box::new(cellular_automata::app::App::with_preset(cc, start.as_deref())))
-                }),
-            )
+            .start(canvas, web_options, Box::new(move |cc| Ok(Box::new(App::start(cc, start)))))
             .await;
         if let Some(loading) = document.get_element_by_id("loading") {
             match result {

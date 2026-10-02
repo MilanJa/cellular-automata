@@ -98,6 +98,12 @@ Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule 
 whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
 how much the render side alone can do.
 
+## Sharing a scene
+
+**Share** copies a link to the clipboard that reproduces the current scene exactly (shaders,
+grid, params, modulations) in the web version: the preset is compressed into the URL fragment,
+so nothing is uploaded anywhere. The desktop build produces the same links.
+
 ## Animating parameters
 
 Every numeric slider has a **~** button. It opens a small panel where you pick a wave (sine,

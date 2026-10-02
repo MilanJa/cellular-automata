@@ -2,6 +2,7 @@
 
 pub mod builtin;
 pub mod bundle;
+pub mod share;
 
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]

@@ -29,6 +29,15 @@ use state::{
 
 const DEFAULT_BUILTIN: usize = 2; // Game of Life
 
+/// What to load when the app opens.
+pub enum Start {
+    Default,
+    /// A built-in id or, on the desktop, a preset folder.
+    Named(String),
+    /// A preset decoded from a share link.
+    Shared(Preset),
+}
+
 /// The in-app "save to browser" prompt (the web has no folder picker).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SaveDialog {
@@ -61,6 +70,10 @@ impl App {
     /// `start` is a built-in id (e.g. `rule30`) or, on the desktop, a preset folder;
     /// `None` loads Game of Life.
     pub fn with_preset(cc: &eframe::CreationContext<'_>, start: Option<&str>) -> Self {
+        Self::start(cc, start.map_or(Start::Default, |s| Start::Named(s.to_string())))
+    }
+
+    pub fn start(cc: &eframe::CreationContext<'_>, start: Start) -> Self {
         let rs = cc
             .wgpu_render_state
             .as_ref()
@@ -68,11 +81,12 @@ impl App {
         let mut start_error = None;
         let default = || (load_builtin(&BUILTINS[DEFAULT_BUILTIN]), PresetSource::Builtin(DEFAULT_BUILTIN));
         let (preset, source) = match start {
-            None => default(),
-            Some(id) => match BUILTINS.iter().position(|b| b.id == id) {
+            Start::Default => default(),
+            Start::Shared(p) => (p, PresetSource::Imported),
+            Start::Named(id) => match BUILTINS.iter().position(|b| b.id == id) {
                 Some(i) => (load_builtin(&BUILTINS[i]), PresetSource::Builtin(i)),
                 None => {
-                    let location = SavedLocation::Folder(std::path::PathBuf::from(id));
+                    let location = SavedLocation::Folder(std::path::PathBuf::from(&id));
                     match platform::load_saved(&location) {
                         Ok(p) => (p, PresetSource::Saved(location)),
                         Err(e) => {
@@ -364,6 +378,20 @@ impl App {
 
     pub(crate) fn export_pending(&self) -> bool {
         self.sim.lock().unwrap().export_pending()
+    }
+
+    /// Copies a link that reproduces the current scene to the clipboard.
+    pub(crate) fn share(&mut self, ctx: &egui::Context) {
+        let preset = state_to_preset(&self.state);
+        match crate::preset::share::encode_share_code(&preset) {
+            Ok(code) => {
+                let url = crate::preset::share::share_url(&platform::share_base_url(), &code);
+                let len = url.len();
+                ctx.copy_text(url);
+                self.report(format!("Link copied to the clipboard ({len} characters)."));
+            }
+            Err(e) => self.report(format!("could not build a share link: {e:#}")),
+        }
     }
 
     pub(crate) fn export(&mut self) {
