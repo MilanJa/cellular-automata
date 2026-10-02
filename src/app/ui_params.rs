@@ -170,6 +170,48 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     ui.separator();
+    ui.heading("MIDI");
+    ui.horizontal(|ui| {
+        let label = if app.midi.is_some() { "Disable MIDI" } else { "Enable MIDI" };
+        if ui.button(label).on_hover_text("Bind controller knobs to values with Learn in a slider's ~ menu").clicked() {
+            app.toggle_midi();
+        }
+        if let Some(rx) = &app.midi {
+            let ports = if rx.port_names.is_empty() { "waiting for permission...".to_string() } else { rx.port_names.join(", ") };
+            ui.label(egui::RichText::new(ports).weak());
+        }
+    });
+    if app.midi.is_some() {
+        ui.horizontal(|ui| {
+            ui.label("last");
+            match app.last_cc {
+                Some(key) => ui.label(egui::RichText::new(key.label()).monospace()),
+                None => ui.label(egui::RichText::new("nothing yet").weak()),
+            };
+            if let Some(name) = app.state.midi_map.learning() {
+                ui.label(egui::RichText::new(format!("learning {name}: move a knob")).color(egui::Color32::from_rgb(255, 190, 90)));
+            }
+        });
+        let bound: Vec<(String, String)> = app
+            .state
+            .midi_map
+            .bindings
+            .iter()
+            .filter(|(n, _)| app.state.specs.iter().any(|s| &s.name == *n))
+            .map(|(n, k)| (n.clone(), k.label()))
+            .collect();
+        if !bound.is_empty() {
+            egui::Grid::new("midi-bindings").num_columns(2).show(ui, |ui| {
+                for (name, key) in bound {
+                    ui.label(name);
+                    ui.label(egui::RichText::new(key).monospace());
+                    ui.end_row();
+                }
+            });
+        }
+    }
+
+    ui.separator();
     ui.heading("Layer B");
     ui.label(
         egui::RichText::new("A second automaton running alongside; shaders read it with other(x, y).")
@@ -256,6 +298,42 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+/// MIDI learn / binding controls at the top of a param's "~" menu. Returns true if a binding was
+/// removed (the param keeps its current value, but the preset changed).
+fn midi_row(app: &mut App, ui: &mut egui::Ui, spec: &ParamSpec) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("MIDI").small().weak());
+        let learning = app.state.midi_map.learning() == Some(spec.name.as_str());
+        if learning {
+            ui.label(egui::RichText::new("move a knob...").color(egui::Color32::from_rgb(255, 190, 90)));
+            if ui.small_button("Cancel").clicked() {
+                app.state.midi_map.cancel_learn();
+            }
+            return;
+        }
+        if let Some(key) = app.state.midi_map.bindings.get(&spec.name).copied() {
+            ui.label(key.label());
+            if ui.small_button("Unbind").clicked() {
+                app.state.midi_map.bindings.remove(&spec.name);
+                changed = true;
+            }
+        }
+        if ui.small_button("Learn").on_hover_text("Bind the next knob you move to this value").clicked() {
+            if app.midi.is_none() {
+                app.toggle_midi();
+            }
+            if app.midi.is_some() {
+                app.state.midi_map.learn(&spec.name);
+            }
+        }
+        if app.midi.is_none() && !app.state.midi_map.bindings.contains_key(&spec.name) {
+            ui.label(egui::RichText::new("(Learn also enables MIDI)").weak().small());
+        }
+    });
+    changed
+}
+
 /// The "~" button next to a numeric param: opens the LFO popover; lit while a modulation is active.
 fn modulation_button(
     app: &mut App,
@@ -264,10 +342,13 @@ fn modulation_button(
     live: Option<&std::collections::BTreeMap<String, ParamValue>>,
 ) -> bool {
     let active = app.state.modulations.contains_key(&spec.name);
+    let bound = app.state.midi_map.bindings.contains_key(&spec.name);
     let audio_on = app.audio.is_some();
     let mut changed = false;
     let label = if active {
         egui::RichText::new("~").strong().color(egui::Color32::from_rgb(120, 200, 255))
+    } else if bound {
+        egui::RichText::new("~").strong().color(egui::Color32::from_rgb(255, 190, 90))
     } else {
         egui::RichText::new("~").weak()
     };
@@ -277,6 +358,8 @@ fn modulation_button(
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     egui::containers::menu::MenuButton::new(label).config(config).ui(ui, |ui| {
         ui.set_min_width(300.0);
+        changed |= midi_row(app, ui, spec);
+        ui.separator();
         match app.state.modulations.get_mut(&spec.name) {
             None => {
                 ui.label(egui::RichText::new("Modulate this value over time").small().weak());

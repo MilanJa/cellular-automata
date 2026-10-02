@@ -47,6 +47,9 @@ pub struct PresetMeta {
     /// Time-driven modulation per param name (see `app::modulation`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub modulation: BTreeMap<String, crate::app::modulation::Modulation>,
+    /// MIDI controller knob per param name (see `midi::mapping`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub midi: BTreeMap<String, crate::midi::mapping::CcKey>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -216,6 +219,7 @@ mod tests {
                 blend: 0.0,
                 params,
                 modulation: BTreeMap::new(),
+                midi: BTreeMap::new(),
             },
             rule: "fn rule() {}\n".into(),
             render: "fn shade() {}\n".into(),
@@ -377,6 +381,19 @@ mod tests {
         assert_eq!(back, p.meta);
         let plain: PresetMeta = toml::from_str(&toml::to_string(&sample().meta).unwrap()).unwrap();
         assert!(plain.modulation.is_empty());
+    }
+
+    #[test]
+    fn midi_table_round_trips_and_defaults_to_empty() {
+        use crate::midi::mapping::CcKey;
+        let mut p = sample();
+        p.meta.midi.insert("threshold".into(), CcKey { channel: 1, cc: 74 });
+        let text = toml::to_string(&p.meta).unwrap();
+        assert!(text.contains("[midi.threshold]"), "{text}");
+        let back: PresetMeta = toml::from_str(&text).unwrap();
+        assert_eq!(back, p.meta);
+        let plain: PresetMeta = toml::from_str(&toml::to_string(&sample().meta).unwrap()).unwrap();
+        assert!(plain.midi.is_empty());
     }
 
     #[test]

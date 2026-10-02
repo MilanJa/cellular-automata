@@ -180,6 +180,13 @@ permission. Four live levels (overall, low, mid, high band, each auto-gained to 
 meters and as sources in every slider's **~** menu next to the waves. Audio sources are
 unipolar: silence leaves the slider's value, sound pushes it up by `amount` of its range.
 
+## MIDI controllers
+
+**MIDI → Enable MIDI** (Params panel) opens every connected input (the browser asks for
+permission). Open a slider's **~** menu and press **Learn**, then move a knob: that controller
+now drives the value across its range. Bindings are saved with the preset (`[midi]` table) and
+listed in the MIDI section. One knob drives one value; learning it again moves it.
+
 ## Painting
 
 Drag on the grid with the left mouse button to paint cells, right button to erase. **Brush** (under

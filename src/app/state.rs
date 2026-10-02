@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use web_time::Instant;
 
 use crate::app::modulation::Modulation;
+use crate::midi::mapping::{CcKey, MidiMap};
 use crate::platform::SavedLocation;
 
 use crate::preset::{param_value_from_toml, param_value_to_toml, InitPattern, Preset, PresetMeta};
@@ -130,6 +131,8 @@ pub struct AppState {
     pub values: BTreeMap<String, ParamValue>,
     /// Active LFOs by param name.
     pub modulations: BTreeMap<String, Modulation>,
+    /// MIDI knob bindings by param name, plus the pending "learn".
+    pub midi_map: MidiMap,
     pub errors: Vec<Diagnostic>,
     /// True when anything savable changed since the preset was loaded or saved.
     pub modified: bool,
@@ -175,6 +178,7 @@ impl AppState {
             specs,
             values,
             modulations: BTreeMap::new(),
+            midi_map: MidiMap::default(),
             errors: Vec::new(),
             modified: false,
             playing: true,
@@ -318,6 +322,7 @@ pub struct LoadedPreset {
     pub post: Assembled,
     pub toml_params: BTreeMap<String, toml::Value>,
     pub modulations: BTreeMap<String, Modulation>,
+    pub midi: BTreeMap<String, CcKey>,
     pub blend: f32,
     pub name: String,
 }
@@ -337,6 +342,7 @@ pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderEr
         post,
         toml_params,
         modulations: preset.meta.modulation.clone(),
+        midi: preset.meta.midi.clone(),
         blend: preset.meta.blend.clamp(0.0, 1.0),
         name: preset.meta.name.clone(),
     })
@@ -365,6 +371,13 @@ pub fn state_to_preset(state: &AppState) -> Preset {
                 .iter()
                 .filter(|(name, _)| state.specs.iter().any(|s| &s.name == *name))
                 .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            midi: state
+                .midi_map
+                .bindings
+                .iter()
+                .filter(|(name, _)| state.specs.iter().any(|s| &s.name == *name))
+                .map(|(k, v)| (k.clone(), *v))
                 .collect(),
         },
         rule: state.editor.rule.clone(),
@@ -475,6 +488,28 @@ mod tests {
         assert_eq!(back.meta.mode, p.meta.mode);
         assert_eq!(back.meta.name, p.meta.name);
         assert!(back.meta.params.contains_key("fade"));
+    }
+
+    #[test]
+    fn midi_bindings_survive_the_state_round_trip_but_only_for_declared_params() {
+        let mut p = load_builtin(&BUILTINS[2]);
+        p.meta.midi.insert("fade".into(), CcKey { channel: 1, cc: 74 });
+        p.meta.midi.insert("ghost".into(), CcKey { channel: 1, cc: 75 });
+        let loaded = prepare_preset_load(&p).unwrap();
+        assert_eq!(loaded.midi, p.meta.midi, "loading keeps the table verbatim");
+        let mut state = AppState::from_parts(
+            loaded.editor,
+            loaded.config,
+            loaded.steps_per_frame,
+            loaded.specs.clone(),
+            resolve_values(&loaded.specs, &loaded.toml_params, &BTreeMap::new()),
+            loaded.name,
+            PresetSource::Builtin(2),
+        );
+        state.midi_map = MidiMap::from_bindings(loaded.midi);
+        let back = state_to_preset(&state);
+        assert_eq!(back.meta.midi.get("fade"), Some(&CcKey { channel: 1, cc: 74 }));
+        assert!(!back.meta.midi.contains_key("ghost"), "stale bindings are dropped on save");
     }
 
     #[test]

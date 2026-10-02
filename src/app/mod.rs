@@ -21,6 +21,8 @@ use crate::shader::validate::ShaderFile;
 use crate::app::modulation::modulated_values_with_audio;
 use crate::audio::analysis::AudioLevels;
 use crate::audio::AudioInput;
+use crate::midi::MidiReceiver;
+use crate::midi::mapping::{CcKey, MidiMap, apply_cc};
 use crate::app::mutate::mutate_values;
 use crate::sim::stats::detect_stuck;
 use crate::sim::paint::{pointer_to_cell, Stroke};
@@ -90,6 +92,9 @@ pub struct App {
     /// Microphone input while enabled, and the latest analysed levels.
     pub(crate) audio: Option<AudioInput>,
     pub(crate) audio_levels: AudioLevels,
+    /// MIDI input while enabled, and the last knob that moved (for the learn UI).
+    pub(crate) midi: Option<MidiReceiver>,
+    pub(crate) last_cc: Option<CcKey>,
 }
 
 impl App {
@@ -157,9 +162,12 @@ impl App {
             layer_b: None,
             audio: None,
             audio_levels: AudioLevels::default(),
+            midi: None,
+            last_cc: None,
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
+        app.state.midi_map = MidiMap::from_bindings(preset.meta.midi.clone());
         app.state.blend = preset.meta.blend.clamp(0.0, 1.0);
         app.sim.lock().unwrap().set_blend(app.state.blend);
         app.apply_shaders_with_toml(&toml_params);
@@ -199,6 +207,7 @@ impl App {
         self.state.values = resolve_values(&loaded.specs, &loaded.toml_params, &BTreeMap::new());
         self.state.specs = loaded.specs;
         self.state.modulations = loaded.modulations;
+        self.state.midi_map = MidiMap::from_bindings(loaded.midi);
         self.state.blend = loaded.blend;
         self.sim.lock().unwrap().set_blend(loaded.blend);
         self.state.errors.clear();
@@ -286,6 +295,44 @@ impl App {
         match AudioInput::start() {
             Ok(input) => self.audio = Some(input),
             Err(e) => self.report(format!("could not open the microphone: {e:#}")),
+        }
+    }
+
+    pub(crate) fn toggle_midi(&mut self) {
+        if self.midi.is_some() {
+            self.midi = None;
+            self.state.midi_map.cancel_learn();
+            return;
+        }
+        match MidiReceiver::start() {
+            Ok(rx) => self.midi = Some(rx),
+            Err(e) => self.report(format!("could not open MIDI input: {e:#}")),
+        }
+    }
+
+    /// Applies received control changes: a pending learn binds the knob, bound knobs move params.
+    fn poll_midi(&mut self) {
+        let Some(rx) = &mut self.midi else { return };
+        let messages = rx.poll();
+        if let Some(err) = rx.error() {
+            self.midi = None;
+            self.state.midi_map.cancel_learn();
+            self.report(err);
+            return;
+        }
+        let mut moved = false;
+        for msg in messages {
+            self.last_cc = Some(msg.key());
+            if self.state.midi_map.on_message(msg).is_some() {
+                self.state.modified = true;
+            }
+            if !apply_cc(&self.state.specs, &mut self.state.values, &self.state.midi_map, msg).is_empty() {
+                moved = true;
+            }
+        }
+        if moved {
+            self.state.modified = true;
+            self.push_params();
         }
     }
 
@@ -794,6 +841,7 @@ impl eframe::App for App {
         self.poll_export_image();
         self.poll_stats();
         self.poll_audio();
+        self.poll_midi();
         self.poll_dropped_and_imported_files();
         self.handle_dropped_files(&ctx);
         if self.modulation_active() {
@@ -851,6 +899,7 @@ impl eframe::App for App {
             || self.modulation_active()
             || self.recording.is_some()
             || self.audio.is_some()
+            || self.midi.is_some()
         {
             ctx.request_repaint();
         }
