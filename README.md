@@ -67,6 +67,13 @@ to play with). Edit, press Ctrl+Enter, then **Save as…** when you like the res
 Compile errors show in the bottom panel with the line number in *your* source. Click an
 error to jump to it. The previous working shader keeps running until the new one compiles.
 
+## Crossfading two rules
+
+**Rule B** is an optional second rule with the same `fn rule(...)` signature. When it is present,
+both rules run on every cell and the **Blend A → B** slider mixes their results per cell, so you
+can morph Life into HighLife or Seeds live (helper functions defined in A and B must have
+different names). Stored as `rule_b.wgsl` plus `blend` in `preset.toml`.
+
 ## Post-processing
 
 A third editor, **Post (WGSL)**, runs on the finished picture at viewport resolution:

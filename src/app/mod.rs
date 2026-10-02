@@ -124,6 +124,8 @@ impl App {
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
+        app.state.blend = preset.meta.blend.clamp(0.0, 1.0);
+        app.sim.lock().unwrap().set_blend(app.state.blend);
         app.apply_shaders_with_toml(&toml_params);
         if let Some(msg) = start_error {
             app.report(msg);
@@ -161,6 +163,8 @@ impl App {
         self.state.values = resolve_values(&loaded.specs, &loaded.toml_params, &BTreeMap::new());
         self.state.specs = loaded.specs;
         self.state.modulations = loaded.modulations;
+        self.state.blend = loaded.blend;
+        self.sim.lock().unwrap().set_blend(loaded.blend);
         self.state.errors.clear();
         self.state.modified = false;
         self.state.started = web_time::Instant::now();
@@ -207,6 +211,12 @@ impl App {
     }
 
     /// Uploads the current param values with any active modulations applied.
+    pub(crate) fn set_blend(&mut self, blend: f32) {
+        self.state.blend = blend.clamp(0.0, 1.0);
+        self.state.modified = true;
+        self.sim.lock().unwrap().set_blend(self.state.blend);
+    }
+
     pub(crate) fn push_params(&self) {
         let values = self.effective_values();
         let packed = pack_params(&self.state.specs, &values);

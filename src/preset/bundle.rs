@@ -12,6 +12,8 @@ struct Bundle {
     render: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     post: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rule_b: Option<String>,
 }
 
 pub fn to_bundle(preset: &Preset) -> anyhow::Result<String> {
@@ -20,13 +22,14 @@ pub fn to_bundle(preset: &Preset) -> anyhow::Result<String> {
         rule: preset.rule.clone(),
         render: preset.render.clone(),
         post: preset.post.clone(),
+        rule_b: preset.rule_b.clone(),
     };
     Ok(toml::to_string(&b)?)
 }
 
 pub fn from_bundle(text: &str) -> anyhow::Result<Preset> {
     let b: Bundle = toml::from_str(text)?;
-    Ok(Preset { meta: b.meta, rule: b.rule, render: b.render, post: b.post })
+    Ok(Preset { meta: b.meta, rule: b.rule, render: b.render, post: b.post, rule_b: b.rule_b })
 }
 
 pub const BUNDLE_SUFFIX: &str = ".capreset.toml";
@@ -69,5 +72,13 @@ mod tests {
         p.post = Some("fn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> { return color; }\n".into());
         let back = from_bundle(&to_bundle(&p).unwrap()).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn bundle_carries_rule_b() {
+        let mut p = load_builtin(&BUILTINS[2]);
+        p.rule_b = Some("fn rule(pos: vec2<u32>) -> vec4<f32> { return off(); }\n".into());
+        p.meta.blend = 0.7;
+        assert_eq!(from_bundle(&to_bundle(&p).unwrap()).unwrap(), p);
     }
 }

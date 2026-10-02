@@ -6,6 +6,7 @@ use super::hints::hint_for;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShaderFile {
     Rule,
+    RuleB,
     Render,
     Post,
 }
@@ -14,10 +15,31 @@ impl ShaderFile {
     pub fn label(self) -> &'static str {
         match self {
             ShaderFile::Rule => "rule.wgsl",
+            ShaderFile::RuleB => "rule_b.wgsl",
             ShaderFile::Render => "render.wgsl",
             ShaderFile::Post => "post.wgsl",
         }
     }
+}
+
+/// Validates a rule pair (see `assemble_rule_pair`) and attributes each error to rule A or B
+/// with a line number relative to that rule's own text.
+pub fn validate_pair(assembled: &Assembled) -> Result<naga::Module, Vec<ShaderError>> {
+    let a_lines = assembled
+        .rule_b_line_offset
+        .map(|b| b.saturating_sub(assembled.user_line_offset))
+        .unwrap_or(assembled.user_line_count);
+    validate(ShaderFile::Rule, assembled).map_err(|errs| {
+        errs.into_iter()
+            .map(|mut e| {
+                if e.line > a_lines {
+                    e.file = ShaderFile::RuleB;
+                    e.line -= a_lines;
+                }
+                e
+            })
+            .collect()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -209,5 +231,20 @@ mod tests {
         let errs = validate(ShaderFile::Post, &assemble_post(bad, &params_wgsl(&[]))).unwrap_err();
         assert_eq!((errs[0].file, errs[0].line), (ShaderFile::Post, 2));
         assert_eq!(ShaderFile::Post.label(), "post.wgsl");
+    }
+
+    #[test]
+    fn rule_pair_validates_and_errors_in_b_are_attributed_to_rule_b() {
+        use crate::shader::assemble::assemble_rule_pair;
+        let life = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let n = neighbours(i32(pos.x), i32(pos.y));\n    let me = alive(i32(pos.x), i32(pos.y));\n    return on_if((me && (n == 2u || n == 3u)) || (!me && n == 3u));\n}\n";
+        let seeds = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    return on_if(!alive(i32(pos.x), i32(pos.y)) && neighbours(i32(pos.x), i32(pos.y)) == 2u);\n}\n";
+        assert!(validate_pair(&assemble_rule_pair(life, seeds, &params_wgsl(&[]))).is_ok());
+        let bad_b = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    return oops(;\n}\n";
+        let errs = validate_pair(&assemble_rule_pair(life, bad_b, &params_wgsl(&[]))).unwrap_err();
+        assert_eq!((errs[0].file, errs[0].line), (ShaderFile::RuleB, 2), "{:?}", errs[0]);
+        assert_eq!(ShaderFile::RuleB.label(), "rule_b.wgsl");
+        let bad_a = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    return oops(;\n}\n";
+        let errs = validate_pair(&assemble_rule_pair(bad_a, seeds, &params_wgsl(&[]))).unwrap_err();
+        assert_eq!((errs[0].file, errs[0].line), (ShaderFile::Rule, 2), "{:?}", errs[0]);
     }
 }

@@ -7,11 +7,13 @@ use crate::app::modulation::Modulation;
 use crate::platform::SavedLocation;
 
 use crate::preset::{param_value_from_toml, param_value_to_toml, InitPattern, Preset, PresetMeta};
-use crate::shader::assemble::{assemble_post, assemble_render, assemble_rule, Assembled, DEFAULT_POST};
+use crate::shader::assemble::{
+    assemble_post, assemble_render, assemble_rule, assemble_rule_pair, Assembled, DEFAULT_POST,
+};
 use crate::shader::params::{
     merge_params, params_wgsl, parse_params, ParamError, ParamSpec, ParamValue,
 };
-use crate::shader::validate::{validate, ShaderError, ShaderFile};
+use crate::shader::validate::{validate, validate_pair, ShaderError, ShaderFile};
 use crate::sim::SimConfig;
 
 /// Upper bounds applied to values coming from the UI *and* from hand-edited preset files.
@@ -30,11 +32,14 @@ pub enum PresetSource {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EditorState {
     pub rule: String,
+    /// Optional second rule; empty means a single rule.
+    pub rule_b: String,
     pub render: String,
     /// Post-processing shader text; `DEFAULT_POST` when the preset has none.
     pub post: String,
     /// True when the rule editor changed since the last successful apply.
     pub rule_dirty: bool,
+    pub rule_b_dirty: bool,
     /// True when the render editor changed since the last successful apply.
     pub render_dirty: bool,
     pub post_dirty: bool,
@@ -44,6 +49,7 @@ impl EditorState {
     pub fn mark_dirty(&mut self, file: ShaderFile) {
         match file {
             ShaderFile::Rule => self.rule_dirty = true,
+            ShaderFile::RuleB => self.rule_b_dirty = true,
             ShaderFile::Render => self.render_dirty = true,
             ShaderFile::Post => self.post_dirty = true,
         }
@@ -52,19 +58,30 @@ impl EditorState {
     pub fn is_dirty(&self, file: ShaderFile) -> bool {
         match file {
             ShaderFile::Rule => self.rule_dirty,
+            ShaderFile::RuleB => self.rule_b_dirty,
             ShaderFile::Render => self.render_dirty,
             ShaderFile::Post => self.post_dirty,
         }
     }
 
     pub fn any_dirty(&self) -> bool {
-        self.rule_dirty || self.render_dirty || self.post_dirty
+        self.rule_dirty || self.rule_b_dirty || self.render_dirty || self.post_dirty
     }
 
     pub fn clear_dirty(&mut self) {
         self.rule_dirty = false;
+        self.rule_b_dirty = false;
         self.render_dirty = false;
         self.post_dirty = false;
+    }
+
+    pub fn has_rule_b(&self) -> bool {
+        !self.rule_b.trim().is_empty()
+    }
+
+    /// Rule B text for a preset: `None` when the editor is empty.
+    pub fn rule_b_for_preset(&self) -> Option<String> {
+        if self.has_rule_b() { Some(self.rule_b.clone()) } else { None }
     }
 
     /// The post text to store in a preset: `None` when it is the untouched pass-through.
@@ -138,6 +155,8 @@ pub struct AppState {
     pub auto_reseed: bool,
     /// How an imported image is turned into cells.
     pub seed_mode: crate::sim::seed_image::SeedMode,
+    /// Crossfade between rule A and rule B.
+    pub blend: f32,
 }
 
 impl AppState {
@@ -175,6 +194,7 @@ impl AppState {
             stuck_since: None,
             auto_reseed: false,
             seed_mode: Default::default(),
+            blend: 0.0,
         }
     }
 }
@@ -224,19 +244,28 @@ pub fn build_shaders(
 ) -> Result<(Vec<ParamSpec>, Assembled, Assembled, Assembled), Vec<ShaderError>> {
     let rule_params =
         parse_params(&editor.rule).map_err(|e| vec![param_err(ShaderFile::Rule, e)])?;
+    let rule_b_params =
+        parse_params(&editor.rule_b).map_err(|e| vec![param_err(ShaderFile::RuleB, e)])?;
     let render_params =
         parse_params(&editor.render).map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
     let post_params =
         parse_params(&editor.post).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
-    let specs = merge_params(rule_params, render_params)
+    let specs = merge_params(rule_params, rule_b_params).map_err(|e| vec![param_err(ShaderFile::RuleB, e)])?;
+    let specs = merge_params(specs, render_params)
         .map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
     let specs = merge_params(specs, post_params).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
     let pw = params_wgsl(&specs);
-    let rule = assemble_rule(&editor.rule, &pw);
+    let pair = editor.has_rule_b();
+    let rule = if pair {
+        assemble_rule_pair(&editor.rule, &editor.rule_b, &pw)
+    } else {
+        assemble_rule(&editor.rule, &pw)
+    };
     let render = assemble_render(&editor.render, &pw);
     let post = assemble_post(&editor.post, &pw);
     let mut errors = Vec::new();
-    if let Err(e) = validate(ShaderFile::Rule, &rule) {
+    let rule_result = if pair { validate_pair(&rule) } else { validate(ShaderFile::Rule, &rule) };
+    if let Err(e) = rule_result {
         errors.extend(e);
     }
     if let Err(e) = validate(ShaderFile::Render, &render) {
@@ -256,6 +285,7 @@ pub fn preset_to_state(
     let m = &preset.meta;
     let editor = EditorState {
         rule: preset.rule.clone(),
+        rule_b: preset.rule_b.clone().unwrap_or_default(),
         render: preset.render.clone(),
         post: preset.post.clone().unwrap_or_else(|| DEFAULT_POST.to_string()),
         ..Default::default()
@@ -288,6 +318,7 @@ pub struct LoadedPreset {
     pub post: Assembled,
     pub toml_params: BTreeMap<String, toml::Value>,
     pub modulations: BTreeMap<String, Modulation>,
+    pub blend: f32,
     pub name: String,
 }
 
@@ -306,6 +337,7 @@ pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderEr
         post,
         toml_params,
         modulations: preset.meta.modulation.clone(),
+        blend: preset.meta.blend.clamp(0.0, 1.0),
         name: preset.meta.name.clone(),
     })
 }
@@ -326,6 +358,7 @@ pub fn state_to_preset(state: &AppState) -> Preset {
             steps_per_frame: state.steps_per_frame,
             seed: c.seed,
             init: c.init.clone(),
+            blend: state.blend,
             params,
             modulation: state
                 .modulations
@@ -337,6 +370,7 @@ pub fn state_to_preset(state: &AppState) -> Preset {
         rule: state.editor.rule.clone(),
         render: state.editor.render.clone(),
         post: state.editor.post_for_preset(),
+        rule_b: state.editor.rule_b_for_preset(),
     }
 }
 
@@ -536,5 +570,22 @@ mod tests {
         assert!(!e.is_dirty(ShaderFile::Rule));
         e.clear_dirty();
         assert!(!e.any_dirty());
+    }
+
+    #[test]
+    fn build_shaders_uses_the_pair_when_rule_b_is_present() {
+        let mut editor = preset_to_state(&load_builtin(&BUILTINS[2])).0;
+        assert!(editor.rule_b.is_empty());
+        let (_, rule, _, _) = build_shaders(&editor).unwrap();
+        assert!(!rule.source.contains("fn rule_b("));
+        editor.rule_b = "fn rule(pos: vec2<u32>) -> vec4<f32> { return on_if(!alive(i32(pos.x), i32(pos.y)) && neighbours(i32(pos.x), i32(pos.y)) == 2u); }\n".into();
+        let (_, rule, _, _) = build_shaders(&editor).unwrap();
+        assert!(rule.source.contains("fn rule_b("));
+        editor.rule_b = "fn rule(pos: vec2<u32>) -> vec4<f32> { return 1.0; }\n".into();
+        let errs = build_shaders(&editor).unwrap_err();
+        assert!(errs.iter().any(|e| e.file == ShaderFile::RuleB));
+        // Rule B's text only reaches the preset when it is non-empty.
+        editor.rule_b = "   \n".into();
+        assert_eq!(editor.rule_b_for_preset(), None);
     }
 }

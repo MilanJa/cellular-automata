@@ -14,9 +14,33 @@ fn char_index_of_line(text: &str, line: usize) -> usize {
 fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
     let dirty = app.state.editor.is_dirty(file);
     let header = format!("{title}{}", if dirty { " *" } else { "" });
-    // The post editor starts collapsed while it is still the pass-through default.
-    let open = file != ShaderFile::Post || app.state.editor.post_for_preset().is_some();
+    // The post editor starts collapsed while it is still the pass-through default, and the
+    // optional rule B while it is empty.
+    let open = match file {
+        ShaderFile::Post => app.state.editor.post_for_preset().is_some(),
+        ShaderFile::RuleB => app.state.editor.has_rule_b(),
+        _ => true,
+    };
     egui::CollapsingHeader::new(header).default_open(open).show(ui, |ui| {
+        if file == ShaderFile::RuleB {
+            ui.label(
+                egui::RichText::new(
+                    "Optional second rule with the same `fn rule(...)` signature. Leave empty for a \
+                     single rule; when present, the Blend slider below crossfades A and B per cell.",
+                )
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Blend A → B");
+                let mut blend = app.state.blend;
+                if ui.add(egui::Slider::new(&mut blend, 0.0..=1.0)).changed() {
+                    app.set_blend(blend);
+                }
+                if !app.state.editor.has_rule_b() {
+                    ui.label(egui::RichText::new("(no rule B yet)").weak());
+                }
+            });
+        }
         ui.horizontal(|ui| {
             if ui.button("Apply (Ctrl+Enter)").clicked() {
                 app.apply_shaders();
@@ -31,6 +55,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
         if let Some((_, line)) = app.pending_cursor.take_if(|(f, _)| *f == file) {
             let text = match file {
                 ShaderFile::Rule => &app.state.editor.rule,
+                ShaderFile::RuleB => &app.state.editor.rule_b,
                 ShaderFile::Render => &app.state.editor.render,
                 ShaderFile::Post => &app.state.editor.post,
             };
@@ -43,6 +68,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
         }
         let text = match file {
             ShaderFile::Rule => &mut app.state.editor.rule,
+            ShaderFile::RuleB => &mut app.state.editor.rule_b,
             ShaderFile::Render => &mut app.state.editor.render,
             ShaderFile::Post => &mut app.state.editor.post,
         };
@@ -65,6 +91,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     one_editor(app, ui, ShaderFile::Rule, "Rule (WGSL)");
+    one_editor(app, ui, ShaderFile::RuleB, "Rule B (WGSL, optional crossfade)");
     one_editor(app, ui, ShaderFile::Render, "Render (WGSL)");
     one_editor(app, ui, ShaderFile::Post, "Post (WGSL)");
 }

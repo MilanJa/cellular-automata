@@ -14,6 +14,9 @@ pub struct Globals {
     pub mode: u32,
     pub row: u32,
     pub prev_row: u32,
+    /// Crossfade between rule A (0) and rule B (1) when a rule pair is loaded.
+    pub blend: f32,
+    pub _pad: [u32; 3],
 }
 
 /// One 16-byte slot per param, in declaration order.
@@ -24,12 +27,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn globals_is_32_bytes() {
-        assert_eq!(std::mem::size_of::<Globals>(), 32);
+    fn globals_is_48_bytes() {
+        assert_eq!(std::mem::size_of::<Globals>(), 48);
     }
 
     #[test]
     fn params_data_is_16_bytes_per_slot() {
         assert_eq!(std::mem::size_of::<ParamsData>(), 16 * MAX_PARAMS);
+    }
+
+    #[test]
+    fn globals_carry_a_blend_factor() {
+        let g = Globals { blend: 0.25, ..Default::default() };
+        assert_eq!(g.blend, 0.25);
+        assert_eq!(std::mem::size_of::<Globals>() % 16, 0, "uniform structs are 16-byte aligned");
     }
 }

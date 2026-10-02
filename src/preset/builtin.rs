@@ -55,7 +55,13 @@ pub const TEMPLATES: &[Builtin] = &[
 pub fn load_builtin(b: &Builtin) -> Preset {
     let meta: PresetMeta = toml::from_str(b.meta_toml)
         .unwrap_or_else(|e| panic!("embedded preset {} has invalid preset.toml: {e}", b.id));
-    Preset { meta, rule: b.rule.to_string(), render: b.render.to_string(), post: b.post.map(str::to_string) }
+    Preset {
+        meta,
+        rule: b.rule.to_string(),
+        render: b.render.to_string(),
+        post: b.post.map(str::to_string),
+        rule_b: None,
+    }
 }
 
 #[cfg(test)]

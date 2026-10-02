@@ -6,6 +6,8 @@ pub struct Assembled {
     /// Number of generated lines before the user's first line. User line `n` is assembled line `n + offset`.
     pub user_line_offset: usize,
     pub user_line_count: usize,
+    /// For a rule pair: the assembled line where rule B's text starts (B follows A directly).
+    pub rule_b_line_offset: Option<usize>,
 }
 
 pub const GLOBALS_WGSL: &str = r#"struct Globals {
@@ -16,6 +18,10 @@ pub const GLOBALS_WGSL: &str = r#"struct Globals {
     mode: u32,
     row: u32,
     prev_row: u32,
+    blend: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 "#;
 
@@ -269,7 +275,41 @@ fn assemble(prelude: &str, user: &str, params_struct: &str, epilogue: &str) -> A
     let user_line_offset = head.lines().count();
     let user_line_count = user.lines().count().max(1);
     let source = format!("{head}{user}\n{epilogue}");
-    Assembled { source, user_line_offset, user_line_count }
+    Assembled { source, user_line_offset, user_line_count, rule_b_line_offset: None }
+}
+
+const RULE_PAIR_EPILOGUE: &str = r#"
+// ---- entry ----
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    var pos = gid.xy;
+    if (globals.mode == 1u) {
+        if (gid.y != 0u) { return; }
+        pos.y = globals.row;
+    }
+    if (pos.x >= globals.size.x || pos.y >= globals.size.y) { return; }
+    textureStore(dst, pos, mix(rule_a(pos), rule_b(pos), globals.blend));
+}
+"#;
+
+/// Two rule shaders in one module: `rule` is renamed to `rule_a` / `rule_b` and the entry point
+/// mixes their results by `globals.blend`. Helper functions the two rules define must not share
+/// names.
+pub fn assemble_rule_pair(rule_a: &str, rule_b: &str, params_struct: &str) -> Assembled {
+    let head = format!("{GLOBALS_WGSL}{params_struct}{RULE_PRELUDE}");
+    let user_line_offset = head.lines().count();
+    let a = rule_a.replace("fn rule(", "fn rule_a(");
+    let b = rule_b.replace("fn rule(", "fn rule_b(");
+    let a_lines = a.lines().count().max(1);
+    let b_lines = b.lines().count().max(1);
+    let a = if a.ends_with('\n') { a } else { format!("{a}\n") };
+    let source = format!("{head}{a}{b}\n{RULE_PAIR_EPILOGUE}");
+    Assembled {
+        source,
+        user_line_offset,
+        user_line_count: a_lines + b_lines,
+        rule_b_line_offset: Some(user_line_offset + a_lines),
+    }
 }
 
 pub fn assemble_rule(user: &str, params_struct: &str) -> Assembled {
@@ -340,5 +380,26 @@ mod tests {
     #[test]
     fn default_post_is_a_passthrough() {
         assert!(DEFAULT_POST.contains("return color;"));
+    }
+
+    #[test]
+    fn rule_pair_renames_both_rules_and_mixes_by_blend() {
+        let a = "fn rule(pos: vec2<u32>) -> vec4<f32> { return on(); }";
+        let b = "fn rule(pos: vec2<u32>) -> vec4<f32> { return off(); }";
+        let p = assemble_rule_pair(a, b, &params_wgsl(&[]));
+        assert!(p.source.contains("fn rule_a(pos: vec2<u32>)"));
+        assert!(p.source.contains("fn rule_b(pos: vec2<u32>)"));
+        assert!(p.source.contains("mix(rule_a(pos), rule_b(pos), globals.blend)"));
+        // Line offsets: A's first line is the first user line, B follows after A.
+        let lines: Vec<&str> = p.source.lines().collect();
+        assert_eq!(lines[p.user_line_offset], "fn rule_a(pos: vec2<u32>) -> vec4<f32> { return on(); }");
+        assert_eq!(p.user_line_count, 2);
+        assert_eq!(p.rule_b_line_offset, Some(p.user_line_offset + 1));
+    }
+
+    #[test]
+    fn single_rule_assembly_has_no_rule_b_offset() {
+        let a = assemble_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return on(); }", &params_wgsl(&[]));
+        assert_eq!(a.rule_b_line_offset, None);
     }
 }

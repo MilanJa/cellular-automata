@@ -741,6 +741,8 @@ impl Simulation {
             mode: mode_code(c.mode),
             row: 1,
             prev_row: 0,
+            blend: self.globals.blend,
+            _pad: [0; 3],
         };
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
     }
@@ -786,6 +788,11 @@ impl Simulation {
 
     pub fn set_time(&mut self, seconds: f32) {
         self.globals.time = seconds;
+    }
+
+    /// Crossfade between rule A and rule B (only used by a rule pair).
+    pub fn set_blend(&mut self, blend: f32) {
+        self.globals.blend = blend.clamp(0.0, 1.0);
     }
 
     fn backend_error(file: ShaderFile, err: Option<wgpu::Error>) -> Result<(), Vec<ShaderError>> {
@@ -1563,6 +1570,37 @@ mod gpu_tests {
         assert_eq!(a, cells);
         assert_eq!(b, cells, "both textures hold the loaded state");
         assert!(sim.load_state(&cells[..8]).is_err(), "wrong size is rejected");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn a_rule_pair_compiles_and_blends() {
+        use crate::shader::assemble::assemble_rule_pair;
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let (_, render, post) = assembled_for(&p.rule, &p.render);
+        // Rule B: everything on. At blend 1 the grid must become fully alive after one step.
+        let all_on = "fn rule(pos: vec2<u32>) -> vec4<f32> { return on(); }";
+        let specs = parse_params(&p.rule).unwrap();
+        let pair = assemble_rule_pair(&p.rule, all_on, &params_wgsl(&specs));
+        let Some(mut sim) = sim_with(SimConfig {
+            mode: Mode::TwoD,
+            width: 16,
+            height: 16,
+            init: InitPattern::Blank,
+            seed: 1,
+        }) else {
+            return;
+        };
+        sim.set_pipelines(&pair, &render, &post).unwrap();
+        sim.set_blend(1.0);
+        assert!(step_and_check(&mut sim, 1).is_none());
+        let live = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
+        assert_eq!(live, 256, "blend 1 selects rule B (all on)");
+        sim.set_blend(0.0);
+        assert!(step_and_check(&mut sim, 1).is_none());
+        let live = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
+        assert_eq!(live, 0, "blend 0 selects rule A (Life kills a full grid)");
     }
 
     #[test]

@@ -39,6 +39,9 @@ pub struct PresetMeta {
     pub steps_per_frame: u32,
     pub seed: u32,
     pub init: InitPattern,
+    /// Crossfade position between rule A and rule B (0..1); only meaningful with a `rule_b.wgsl`.
+    #[serde(default)]
+    pub blend: f32,
     #[serde(default)]
     pub params: BTreeMap<String, toml::Value>,
     /// Time-driven modulation per param name (see `app::modulation`).
@@ -53,6 +56,8 @@ pub struct Preset {
     pub render: String,
     /// Optional post-processing shader (`post.wgsl`); `None` means pass-through.
     pub post: Option<String>,
+    /// Optional second rule (`rule_b.wgsl`) crossfaded with the first by `meta.blend`.
+    pub rule_b: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -66,7 +71,8 @@ impl Preset {
         let render =
             std::fs::read_to_string(dir.join("render.wgsl")).context("reading render.wgsl")?;
         let post = std::fs::read_to_string(dir.join("post.wgsl")).ok();
-        Ok(Preset { meta, rule, render, post })
+        let rule_b = std::fs::read_to_string(dir.join("rule_b.wgsl")).ok();
+        Ok(Preset { meta, rule, render, post, rule_b })
     }
 
     pub fn save_dir(&self, dir: &Path) -> anyhow::Result<()> {
@@ -79,6 +85,12 @@ impl Preset {
             Some(post) => std::fs::write(dir.join("post.wgsl"), post)?,
             None => {
                 let _ = std::fs::remove_file(dir.join("post.wgsl"));
+            }
+        }
+        match &self.rule_b {
+            Some(b) => std::fs::write(dir.join("rule_b.wgsl"), b)?,
+            None => {
+                let _ = std::fs::remove_file(dir.join("rule_b.wgsl"));
             }
         }
         Ok(())
@@ -201,12 +213,14 @@ mod tests {
                 steps_per_frame: 2,
                 seed: 7,
                 init: InitPattern::Random { density: 0.3 },
+                blend: 0.0,
                 params,
                 modulation: BTreeMap::new(),
             },
             rule: "fn rule() {}\n".into(),
             render: "fn shade() {}\n".into(),
             post: None,
+            rule_b: None,
         }
     }
 
@@ -376,5 +390,23 @@ mod tests {
         p.save_dir(dir.path()).unwrap();
         assert!(dir.path().join("post.wgsl").exists());
         assert_eq!(Preset::load_dir(dir.path()).unwrap(), p);
+    }
+
+    #[test]
+    fn optional_rule_b_and_blend_are_saved_and_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = sample();
+        p.save_dir(dir.path()).unwrap();
+        assert!(!dir.path().join("rule_b.wgsl").exists());
+        p.rule_b = Some("fn rule(pos: vec2<u32>) -> vec4<f32> { return off(); }\n".into());
+        p.meta.blend = 0.4;
+        p.save_dir(dir.path()).unwrap();
+        assert!(dir.path().join("rule_b.wgsl").exists());
+        let back = Preset::load_dir(dir.path()).unwrap();
+        assert_eq!(back, p);
+        let text = toml::to_string(&p.meta).unwrap();
+        assert!(text.contains("blend = 0.4"), "{text}");
+        let old: PresetMeta = toml::from_str("name = \"x\"\nmode = \"2d\"\nwidth = 8\nheight = 8\nsteps_per_frame = 1\nseed = 1\n[init]\nkind = \"blank\"\n").unwrap();
+        assert_eq!(old.blend, 0.0);
     }
 }
