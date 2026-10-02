@@ -1,21 +1,22 @@
+use super::theme;
 use super::App;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.state.errors.is_empty() {
-        let msg = if app.sim.lock().unwrap().has_pipelines() {
-            "✔ shaders compiled"
+        let (msg, color) = if app.sim.lock().unwrap().has_pipelines() {
+            ("✔ shaders compiled", theme::OK)
         } else {
-            "no pipeline yet"
+            ("no pipeline yet", theme::WARN)
         };
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(msg).weak());
+            ui.label(egui::RichText::new(msg).color(color));
             super::ui_topbar::stats_readout(app, ui);
         });
         return;
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
         for d in app.state.errors.clone() {
-            let rich = egui::RichText::new(d.text()).color(egui::Color32::from_rgb(230, 110, 110)).monospace();
+            let rich = egui::RichText::new(d.text()).color(theme::ERROR).monospace();
             match d.location() {
                 Some(loc) => {
                     let label = egui::Label::new(rich).sense(egui::Sense::click());

@@ -9,6 +9,7 @@ mod ui_editor;
 mod ui_errors;
 mod ui_params;
 mod ui_topbar;
+pub mod theme;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -113,6 +114,7 @@ impl App {
             .wgpu_render_state
             .as_ref()
             .expect("wgpu render state (the app requires the wgpu backend)");
+        theme::apply(&cc.egui_ctx);
         let mut start_error = None;
         let default = || (load_builtin(&BUILTINS[DEFAULT_BUILTIN]), PresetSource::Builtin(DEFAULT_BUILTIN));
         let (preset, source) = match start {
@@ -857,15 +859,16 @@ impl eframe::App for App {
             self.state.playing = !self.state.playing;
         }
 
-        egui::Panel::top("topbar").show(ui, |ui| ui_topbar::show(self, ui));
+        let chrome = theme::chrome_frame(ui.style());
+        egui::Panel::top("topbar").frame(chrome).show(ui, |ui| ui_topbar::show(self, ui));
         egui::Panel::bottom("errors")
             .resizable(true)
             .default_size(80.0)
+            .frame(chrome)
             .show(ui, |ui| ui_errors::show(self, ui));
         egui::Panel::left("side").resizable(true).default_size(520.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui_editor::show(self, ui);
-                ui.separator();
                 ui_params::show(self, ui);
             });
         });

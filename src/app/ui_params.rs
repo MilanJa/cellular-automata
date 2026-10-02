@@ -1,3 +1,4 @@
+use super::theme;
 use super::App;
 use crate::app::modulation::{Modulation, Wave};
 use crate::preset::{InitPattern, Mode};
@@ -42,8 +43,8 @@ fn param_widget(ui: &mut egui::Ui, spec: &ParamSpec, value: &mut ParamValue) -> 
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    theme::section(ui, "Params");
     ui.horizontal(|ui| {
-        ui.heading("Params");
         if ui.button("Mutate").on_hover_text("Nudge every value a little").clicked() {
             app.mutate();
         }
@@ -82,8 +83,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.push_params();
     }
 
-    ui.separator();
-    ui.heading("Grid");
+    theme::section(ui, "Grid");
     let before = app.state.pending.clone();
     let p = &mut app.state.pending;
     egui::Grid::new("grid-settings").num_columns(2).show(ui, |ui| {
@@ -139,8 +139,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .on_hover_text("Reset with a new seed after the grid has been static or periodic for 2 s");
     });
 
-    ui.separator();
-    ui.heading("Audio");
+    theme::section(ui, "Audio");
     ui.horizontal(|ui| {
         let label = if app.audio.is_some() { "Disable microphone" } else { "Enable microphone" };
         if ui.button(label).on_hover_text("Audio levels become modulation sources in each slider's ~ menu").clicked() {
@@ -157,20 +156,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.label(name);
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 10.0), egui::Sense::hover());
                 let painter = ui.painter();
-                painter.rect_filled(rect, 2.0, egui::Color32::from_gray(35));
+                painter.rect_filled(rect, 2.0, theme::METER_BG);
                 let w = rect.width() * v.clamp(0.0, 1.0);
                 painter.rect_filled(
                     egui::Rect::from_min_size(rect.min, egui::vec2(w, rect.height())),
                     2.0,
-                    egui::Color32::from_rgb(120, 200, 255),
+                    theme::ACCENT,
                 );
                 ui.end_row();
             }
         });
     }
 
-    ui.separator();
-    ui.heading("MIDI");
+    theme::section(ui, "MIDI");
     ui.horizontal(|ui| {
         let label = if app.midi.is_some() { "Disable MIDI" } else { "Enable MIDI" };
         if ui.button(label).on_hover_text("Bind controller knobs to values with Learn in a slider's ~ menu").clicked() {
@@ -189,7 +187,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 None => ui.label(egui::RichText::new("nothing yet").weak()),
             };
             if let Some(name) = app.state.midi_map.learning() {
-                ui.label(egui::RichText::new(format!("learning {name}: move a knob")).color(egui::Color32::from_rgb(255, 190, 90)));
+                ui.label(egui::RichText::new(format!("learning {name}: move a knob")).color(theme::WARN));
             }
         });
         let bound: Vec<(String, String)> = app
@@ -211,8 +209,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    ui.separator();
-    ui.heading("Layer B");
+    theme::section(ui, "Layer B");
     ui.label(
         egui::RichText::new("A second automaton running alongside; shaders read it with other(x, y).")
             .weak(),
@@ -244,8 +241,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     });
 
-    ui.separator();
-    ui.heading("Seed image");
+    theme::section(ui, "Seed image");
     ui.label(egui::RichText::new("Image > Seed grid from image…, or drop a PNG on the window.").weak());
     let mut reapply = false;
     ui.horizontal(|ui| {
@@ -278,8 +274,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.apply_seed_image();
     }
 
-    ui.separator();
-    ui.heading("Brush");
+    theme::section(ui, "Brush");
     ui.label(egui::RichText::new("Drag on the grid to paint; right button erases.").weak());
     egui::Grid::new("brush").num_columns(2).show(ui, |ui| {
         ui.label("radius");
@@ -306,7 +301,7 @@ fn midi_row(app: &mut App, ui: &mut egui::Ui, spec: &ParamSpec) -> bool {
         ui.label(egui::RichText::new("MIDI").small().weak());
         let learning = app.state.midi_map.learning() == Some(spec.name.as_str());
         if learning {
-            ui.label(egui::RichText::new("move a knob...").color(egui::Color32::from_rgb(255, 190, 90)));
+            ui.label(egui::RichText::new("move a knob...").color(theme::WARN));
             if ui.small_button("Cancel").clicked() {
                 app.state.midi_map.cancel_learn();
             }
@@ -346,9 +341,9 @@ fn modulation_button(
     let audio_on = app.audio.is_some();
     let mut changed = false;
     let label = if active {
-        egui::RichText::new("~").strong().color(egui::Color32::from_rgb(120, 200, 255))
+        egui::RichText::new("~").strong().color(theme::ACCENT)
     } else if bound {
-        egui::RichText::new("~").strong().color(egui::Color32::from_rgb(255, 190, 90))
+        egui::RichText::new("~").strong().color(theme::WARN)
     } else {
         egui::RichText::new("~").weak()
     };

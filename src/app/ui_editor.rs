@@ -1,3 +1,4 @@
+use super::theme;
 use super::App;
 use crate::shader::highlight::layouter;
 use crate::shader::validate::ShaderFile;
@@ -21,7 +22,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
         ShaderFile::RuleB => app.state.editor.has_rule_b(),
         _ => true,
     };
-    egui::CollapsingHeader::new(header).default_open(open).show(ui, |ui| {
+    egui::CollapsingHeader::new(egui::RichText::new(header).strong()).default_open(open).show(ui, |ui| {
         if file == ShaderFile::RuleB {
             ui.label(
                 egui::RichText::new(
@@ -42,12 +43,18 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
             });
         }
         ui.horizontal(|ui| {
-            if ui.button("Apply (Ctrl+Enter)").clicked() {
+            // The button lights up while there are unapplied edits.
+            let apply = if dirty {
+                egui::Button::new(egui::RichText::new("Apply (Ctrl+Enter)").strong()).fill(theme::ACCENT_FILL)
+            } else {
+                egui::Button::new("Apply (Ctrl+Enter)")
+            };
+            if ui.add(apply).clicked() {
                 app.apply_shaders();
             }
             let n_err = app.state.errors.iter().filter(|e| e.shader_file() == Some(file)).count();
             if n_err > 0 {
-                ui.colored_label(egui::Color32::from_rgb(230, 90, 90), format!("{n_err} error(s)"));
+                ui.colored_label(theme::ERROR, format!("{n_err} error(s)"));
             }
         });
         let id = editor_id(file);
@@ -73,9 +80,15 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
             ShaderFile::Post => &mut app.state.editor.post,
         };
         let mut lay = layouter();
+        let frame = egui::Frame::new()
+            .fill(theme::EDITOR_BG)
+            .stroke(egui::Stroke::new(1.0, theme::EDITOR_STROKE))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(8, 6));
         let out = egui::TextEdit::multiline(text)
             .id(id)
             .code_editor()
+            .frame(frame)
             .font(egui::FontId::monospace(13.0))
             .desired_rows(14)
             .desired_width(f32::INFINITY)

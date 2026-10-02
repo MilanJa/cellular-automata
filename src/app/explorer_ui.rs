@@ -111,6 +111,7 @@ impl Explorer {
             for (i, t) in self.thumbs.iter().enumerate() {
                 ui.vertical(|ui| {
                     let img = egui::Image::new((t.texture, egui::vec2(THUMB_PX as f32, THUMB_PX as f32)))
+                        .corner_radius(4)
                         .sense(egui::Sense::click());
                     if ui.add(img).on_hover_text("Click to load this rule").clicked() {
                         picked = Some(t.rule);

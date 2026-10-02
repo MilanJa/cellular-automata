@@ -110,12 +110,21 @@ pub fn show_viewport(
 ) -> (egui::Rect, egui::Response) {
     let size = ui.available_size();
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-    ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(12));
+    ui.painter().rect_filled(rect, 0.0, crate::app::theme::VIEWPORT_BG);
     let grid_aspect = {
         let s = sim.lock().unwrap();
         let c = s.config();
         c.width as f32 / c.height.max(1) as f32
     };
+    // A hairline around the grid so it reads as a framed picture against the letterbox.
+    let (fx, fy, fw, fh) = letterbox(rect.width(), rect.height(), grid_aspect);
+    let frame = egui::Rect::from_min_size(rect.min + egui::vec2(fx, fy), egui::vec2(fw, fh));
+    ui.painter().rect_stroke(
+        frame,
+        0.0,
+        egui::Stroke::new(1.0, crate::app::theme::VIEWPORT_FRAME),
+        egui::StrokeKind::Outside,
+    );
     let ppp = ui.ctx().pixels_per_point();
     let (_, _, lw, lh) = letterbox(rect.width() * ppp, rect.height() * ppp, grid_aspect);
     let scene_pixels = ((lw.round() as u32).max(1), (lh.round() as u32).max(1));

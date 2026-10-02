@@ -1,4 +1,5 @@
 use super::state::PresetSource;
+use super::theme;
 use super::App;
 use crate::platform;
 use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
@@ -53,6 +54,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let Some(i) = new_template {
             app.load_template(i);
         }
+        ui.separator();
         let save_hint = if platform::is_web() {
             "Save to this browser (built-ins and templates: Save As)"
         } else {
@@ -74,6 +76,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let ctx = ui.ctx().clone();
             app.share(&ctx);
         }
+        ui.separator();
         if ui
             .selectable_label(app.explorer.is_some(), "Explore")
             .on_hover_text("A grid of random Life-like rules running live; click one to load it")
@@ -116,8 +119,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
 
         ui.separator();
-        let play_label = if app.state.playing { "⏸ Pause" } else { "▶ Play" };
-        if ui.button(play_label).on_hover_text("Space").clicked() {
+        let play = if app.state.playing {
+            egui::Button::new("⏸ Pause")
+        } else {
+            egui::Button::new(egui::RichText::new("▶ Play").color(theme::ACCENT).strong())
+        };
+        if ui.add(play).on_hover_text("Space").clicked() {
             app.state.playing = !app.state.playing;
         }
         if ui.add_enabled(!app.state.playing, egui::Button::new("⏭ Step")).clicked() {
@@ -131,19 +138,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.apply_settings_and_reset();
         }
 
-        ui.separator();
         let frame = app.sim.lock().unwrap().frame();
         let steps_per_sec = app.rate.update(web_time::Instant::now(), frame);
         let dt = ui.input(|i| i.stable_dt).max(1e-6);
-        ui.label(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt));
-        if let Some((done, total)) = app.recording_progress() {
-            ui.colored_label(egui::Color32::from_rgb(230, 90, 90), format!("● recording {done}/{total}"));
-            if ui.small_button("Stop").clicked() {
-                app.stop_recording();
+        // Status lives at the right edge, so the controls keep a stable position.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt))
+                    .weak(),
+            );
+            if let Some((done, total)) = app.recording_progress() {
+                if ui.small_button("Stop").clicked() {
+                    app.stop_recording();
+                }
+                ui.colored_label(theme::ERROR, format!("● recording {done}/{total}"));
+            } else if app.export_pending() {
+                ui.label(egui::RichText::new("exporting image…").weak());
             }
-        } else if app.export_pending() {
-            ui.label(egui::RichText::new("exporting image…").weak());
-        }
+        });
     });
 }
 
@@ -161,7 +173,7 @@ pub fn save_dialog(app: &mut App, ctx: &egui::Context) {
             let resp = ui.text_edit_singleline(&mut name);
             if dialog.confirm_overwrite {
                 ui.colored_label(
-                    egui::Color32::from_rgb(230, 170, 90),
+                    theme::WARN,
                     "A preset with this name already exists. Save again to overwrite it.",
                 );
             }
@@ -211,7 +223,7 @@ pub fn stats_readout(app: &App, ui: &mut egui::Ui) {
     ));
     let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 16.0), egui::Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(30));
+    painter.rect_filled(rect, 2.0, theme::METER_BG);
     let max = app.state.stats.iter().map(|s| s.population).max().unwrap_or(1).max(1) as f32;
     let n = app.state.stats.len();
     if n >= 2 {
@@ -226,14 +238,14 @@ pub fn stats_readout(app: &App, ui: &mut egui::Ui) {
                 egui::pos2(x, y)
             })
             .collect();
-        painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 200, 255))));
+        painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, theme::ACCENT)));
     }
     if let Some(stuck) = app.state.stuck {
         let text = match stuck {
             crate::sim::stats::Stuck::Static => "stuck: static".to_string(),
             crate::sim::stats::Stuck::Periodic(p) => format!("stuck: period {p}"),
         };
-        ui.colored_label(egui::Color32::from_rgb(230, 170, 90), text);
+        ui.colored_label(theme::WARN, text);
     }
 }
 
