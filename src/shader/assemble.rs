@@ -116,6 +116,42 @@ fn on_if(v: bool) -> vec4<f32> {
     return select(off(), on(), v);
 }
 
+// Hexagonal grid: odd rows are shifted right by half a cell (odd-r layout); six neighbours.
+fn neighbours_hex(x: i32, y: i32) -> u32 {
+    let odd = (y & 1) == 1;
+    let dx = select(-1, 0, odd);
+    var n = u32(alive(x - 1, y)) + u32(alive(x + 1, y));
+    n += u32(alive(x + dx, y - 1)) + u32(alive(x + dx + 1, y - 1));
+    n += u32(alive(x + dx, y + 1)) + u32(alive(x + dx + 1, y + 1));
+    return n;
+}
+
+// Triangular grid: cell (x, y) points up when x + y is even, down otherwise.
+fn tri_is_up(x: i32, y: i32) -> bool {
+    return ((x + y) & 1) == 0;
+}
+
+// The three triangles sharing an edge with (x, y).
+fn neighbours_tri(x: i32, y: i32) -> u32 {
+    let third = select(y - 1, y + 1, tri_is_up(x, y));
+    return u32(alive(x - 1, y)) + u32(alive(x + 1, y)) + u32(alive(x, third));
+}
+
+// The twelve triangles sharing at least a corner with (x, y).
+fn neighbours_tri12(x: i32, y: i32) -> u32 {
+    let up = tri_is_up(x, y);
+    let wide = select(y - 1, y + 1, up);
+    let narrow = select(y + 1, y - 1, up);
+    var n = u32(alive(x - 2, y)) + u32(alive(x - 1, y)) + u32(alive(x + 1, y)) + u32(alive(x + 2, y));
+    for (var d = -2; d <= 2; d++) {
+        n += u32(alive(x + d, wide));
+    }
+    for (var d = -1; d <= 1; d++) {
+        n += u32(alive(x + d, narrow));
+    }
+    return n;
+}
+
 // ---- user rule ----
 "#;
 
@@ -169,6 +205,51 @@ fn hsv(h: f32, s: f32, v: f32) -> vec3<f32> {
 fn palette(t: f32) -> vec3<f32> {
     let tt = clamp(t, 0.0, 1.0);
     return vec3<f32>(0.5) + vec3<f32>(0.5) * cos(6.28318 * (tt + vec3<f32>(0.0, 0.33, 0.67)));
+}
+
+// Hexagonal layout (odd rows shifted right by half a cell): the cell under a pixel ...
+fn hex_cell(uv: vec2<f32>) -> vec2<i32> {
+    let size = vec2<f32>(globals.size);
+    let row = i32(floor(uv.y * size.y));
+    let shift = f32(row & 1) * 0.5;
+    return vec2<i32>(i32(floor(uv.x * size.x - shift)), row);
+}
+
+// ... the position inside that cell (-0.5..0.5) ...
+fn hex_local(uv: vec2<f32>) -> vec2<f32> {
+    let size = vec2<f32>(globals.size);
+    let row = i32(floor(uv.y * size.y));
+    let shift = f32(row & 1) * 0.5;
+    return vec2<f32>(fract(uv.x * size.x - shift) - 0.5, fract(uv.y * size.y) - 0.5);
+}
+
+// ... and a pointy-top hexagon distance: 0 at the centre, 1 on the edge of the inscribed hexagon.
+fn hex_dist(p: vec2<f32>) -> f32 {
+    let q = abs(p);
+    return max(q.x + q.y * 0.57735, q.y * 1.1547) * 2.0;
+}
+
+// Triangular layout: cell (x, y) points up when x + y is even.
+fn tri_is_up(x: i32, y: i32) -> bool {
+    return ((x + y) & 1) == 0;
+}
+
+// The triangle under a pixel. Up triangles have their apex at the top of the row and a base two
+// cells wide at the bottom; down triangles are the mirror image, and they tile the row.
+fn tri_cell(uv: vec2<f32>) -> vec2<i32> {
+    let size = vec2<f32>(globals.size);
+    let s = uv.x * size.x;
+    let row = i32(floor(uv.y * size.y));
+    let t = fract(uv.y * size.y);
+    var k = i32(floor(s)) - 1;
+    for (var i = 0; i < 3; i++) {
+        let boundary = f32(k) + 0.5 + select(1.0 - t, t, tri_is_up(k, row));
+        if (s < boundary) {
+            break;
+        }
+        k += 1;
+    }
+    return vec2<i32>(k, row);
 }
 
 // ---- user render ----

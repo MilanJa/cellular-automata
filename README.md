@@ -27,6 +27,8 @@ previous generation, with wraparound at the edges):
 | `moore_sum(x, y) -> vec4<f32>` | sum of the 8 neighbours |
 | `laplacian(x, y) -> vec4<f32>` | 9-point Laplacian, for diffusion |
 | `on()`, `off()`, `on_if(flag)` | the on / off cell values |
+| `neighbours_hex(x, y) -> u32` | hex grid (odd rows shifted half a cell): the 6 neighbours |
+| `neighbours_tri(x, y)`, `neighbours_tri12(x, y)` | triangular grid: 3 edge or 12 corner neighbours; `tri_is_up(x, y)` tells the orientation |
 | `prev_cell(x)`, `prev_alive(x)` | 1D mode: the previous row at column `x` |
 | `noise(pos) -> f32` | a random `0..1` per cell per step |
 | `rand(pos, salt)`, `hash(u)` | deterministic hashing |
@@ -52,6 +54,8 @@ The **Render** editor maps a cell to a colour:
 | `hsv(h, s, v) -> vec3<f32>` | hue, saturation, value in `0..1` |
 | `palette(t) -> vec3<f32>` | a smooth gradient for `t` in `0..1` |
 | `cell_at(x, y)` | another cell's value, by grid coordinate |
+| `hex_cell(uv)`, `hex_local(uv)`, `hex_dist(p)` | hex layout: the cell under a pixel, the position inside it, a hexagon distance for drawing |
+| `tri_cell(uv)`, `tri_is_up(x, y)` | triangular layout: the triangle under a pixel and its orientation |
 
 WGSL has no implicit numeric conversions: `pos.x` is `u32`, so write `f32(pos.x)` or
 `i32(pos.x) - 1`, and give integer literals a suffix (`3u`). When a shader fails to compile,

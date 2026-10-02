@@ -1,0 +1,12 @@
+name = "Triangular grid"
+mode = "2d"
+width = 160
+height = 90
+steps_per_frame = 1
+seed = 12
+
+[init]
+kind = "random"
+density = 0.4
+
+[params]

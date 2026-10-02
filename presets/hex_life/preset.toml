@@ -1,0 +1,12 @@
+name = "Hex Life"
+mode = "2d"
+width = 128
+height = 112
+steps_per_frame = 1
+seed = 5
+
+[init]
+kind = "random"
+density = 0.35
+
+[params]

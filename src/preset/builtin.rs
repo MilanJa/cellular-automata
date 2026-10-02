@@ -39,6 +39,7 @@ pub const BUILTINS: &[Builtin] = &[
     embedded!("lifelike", "lifelike"),
     embedded!("gray_scott", "gray_scott"),
     embedded!("neon_life", "neon_life", post),
+    embedded!("hex_life", "hex_life"),
 ];
 
 /// Commented starting points for new work, offered by the "New" menu.
@@ -50,6 +51,7 @@ pub const TEMPLATES: &[Builtin] = &[
     embedded!("render_only", "templates/render_only"),
     embedded!("neon_life", "neon_life", post),
     embedded!("post_effects", "templates/post_effects", post),
+    embedded!("tri_life", "templates/tri_life"),
 ];
 
 pub fn load_builtin(b: &Builtin) -> Preset {
@@ -103,20 +105,20 @@ mod tests {
 
     #[test]
     fn builtins_have_unique_ids() {
-        assert_eq!(BUILTINS.len(), 6);
+        assert_eq!(BUILTINS.len(), 7);
         let mut ids: Vec<_> = BUILTINS.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 6);
+        assert_eq!(ids.len(), 7);
     }
 
     #[test]
     fn templates_have_unique_ids() {
-        assert_eq!(TEMPLATES.len(), 7);
+        assert_eq!(TEMPLATES.len(), 8);
         let mut ids: Vec<_> = TEMPLATES.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 8);
     }
 
     #[test]

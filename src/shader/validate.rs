@@ -247,4 +247,14 @@ mod tests {
         let errs = validate_pair(&assemble_rule_pair(bad_a, seeds, &params_wgsl(&[]))).unwrap_err();
         assert_eq!((errs[0].file, errs[0].line), (ShaderFile::Rule, 2), "{:?}", errs[0]);
     }
+
+    #[test]
+    fn hex_and_triangle_helpers_are_available_to_rules_and_renders() {
+        let rule = "fn rule(pos: vec2<u32>) -> vec4<f32> {\n    let x = i32(pos.x);\n    let y = i32(pos.y);\n    let h = neighbours_hex(x, y);\n    let t3 = neighbours_tri(x, y);\n    let t12 = neighbours_tri12(x, y);\n    let up = tri_is_up(x, y);\n    return on_if(h == 2u || t3 == 1u || (up && t12 == 4u));\n}\n";
+        let a = assemble_rule(rule, &params_wgsl(&[]));
+        validate(ShaderFile::Rule, &a).unwrap_or_else(|e| panic!("{e:?}\n{}", a.source));
+        let render = "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> {\n    let hc = hex_cell(uv);\n    let hl = hex_local(uv);\n    let hd = hex_dist(hl);\n    let tc = tri_cell(uv);\n    let c = cell_at(hc.x, hc.y).r * (1.0 - hd) + cell_at(tc.x, tc.y).g;\n    return gray(c);\n}\n";
+        let a = assemble_render(render, &params_wgsl(&[]));
+        validate(ShaderFile::Render, &a).unwrap_or_else(|e| panic!("{e:?}\n{}", a.source));
+    }
 }
