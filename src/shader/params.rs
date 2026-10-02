@@ -94,10 +94,51 @@ fn parse_line(line_no: usize, line: &str) -> Option<Result<ParamSpec, ParamError
     Some(parse_body(line_no, body))
 }
 
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !name.starts_with(|c: char| c.is_ascii_digit())
+/// WGSL keywords and reserved words (WGSL spec §15.2 and §15.3), plus the identifiers the
+/// generated prelude uses. A param with one of these names would fail inside the prelude with a
+/// confusing location, so they are rejected at the `@param` line instead.
+const RESERVED_NAMES: &[&str] = &[
+    // keywords
+    "alias", "break", "case", "const", "const_assert", "continue", "continuing", "default",
+    "diagnostic", "discard", "else", "enable", "false", "fn", "for", "if", "let", "loop",
+    "override", "requires", "return", "struct", "switch", "true", "var", "while",
+    // reserved words
+    "NULL", "Self", "abstract", "active", "alignas", "alignof", "as", "asm", "asm_fragment",
+    "async", "attribute", "auto", "await", "become", "cast", "catch", "class", "co_await",
+    "co_return", "co_yield", "coherent", "column_major", "common", "compile", "compile_fragment",
+    "concept", "const_cast", "consteval", "constexpr", "constinit", "crate", "debugger",
+    "decltype", "delete", "demote", "demote_to_helper", "do", "dynamic_cast", "enum", "explicit",
+    "export", "extends", "extern", "external", "fallthrough", "filter", "final", "finally",
+    "friend", "from", "fxgroup", "get", "goto", "groupshared", "highp", "impl", "implements",
+    "import", "inline", "instanceof", "interface", "layout", "lowp", "macro", "macro_rules",
+    "match", "mediump", "meta", "mod", "module", "move", "mut", "mutable", "namespace", "new",
+    "nil", "noexcept", "noinline", "nointerpolation", "non_coherent", "noncoherent", "noperspective",
+    "null", "nullptr", "of", "operator", "package", "packoffset", "partition", "pass", "patch",
+    "pixelfragment", "precise", "precision", "premerge", "priv", "protected", "pub", "public",
+    "readonly", "ref", "regardless", "register", "reinterpret_cast", "require", "resource",
+    "restrict", "self", "set", "shared", "sizeof", "smooth", "snorm", "static", "static_assert",
+    "static_cast", "std", "subroutine", "super", "target", "template", "this", "thread_local",
+    "throw", "trait", "try", "type", "typedef", "typeid", "typename", "typeof", "union", "unless",
+    "unorm", "unsafe", "unsized", "use", "using", "varying", "virtual", "volatile", "wgsl",
+    "where", "with", "writeonly", "yield",
+    // predeclared types and the prelude's own identifiers
+    "bool", "f16", "f32", "i32", "u32", "vec2", "vec3", "vec4", "mat2x2", "mat3x3", "mat4x4",
+    "array", "atomic", "ptr", "sampler", "texture_2d", "texture_storage_2d",
+    "params", "globals", "src", "dst", "state", "cell", "prev_cell", "hash", "rand", "wrap",
+    "rule", "shade", "main", "vs_main", "fs_main", "Globals", "Params", "VsOut", "_unused",
+];
+
+fn valid_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || name.starts_with(|c: char| c.is_ascii_digit())
+    {
+        return Err(format!("invalid param name `{name}`"));
+    }
+    if name.starts_with("_pad") || RESERVED_NAMES.contains(&name) {
+        return Err(format!("param name `{name}` is reserved in WGSL or by the generated prelude"));
+    }
+    Ok(())
 }
 
 fn parse_body(line_no: usize, body: &str) -> Result<ParamSpec, ParamError> {
@@ -105,9 +146,7 @@ fn parse_body(line_no: usize, body: &str) -> Result<ParamSpec, ParamError> {
         .split_once(':')
         .ok_or_else(|| err(line_no, "expected `name: type = default`"))?;
     let name = name.trim();
-    if !valid_name(name) {
-        return Err(err(line_no, format!("invalid param name `{name}`")));
-    }
+    valid_name(name).map_err(|m| err(line_no, m))?;
     let (ty_str, after_ty) = after_name
         .split_once('=')
         .ok_or_else(|| err(line_no, "expected `= default`"))?;
@@ -346,5 +385,19 @@ mod tests {
         assert_eq!(packed[0][0], 1.0f32.to_bits());
         assert_eq!(packed[1][0], 5.0f32.to_bits());
         assert_eq!(packed[2], [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rejects_reserved_and_generated_names() {
+        for bad in ["loop", "fn", "type", "f32", "vec3", "_pad0_0", "_pad7_2", "_unused", "params", "globals"] {
+            assert!(
+                parse_params(&format!("fn x() {{}}\n// @param {bad}: f32 = 1\n")).is_err(),
+                "`{bad}` should be rejected"
+            );
+        }
+        let err = parse_params("fn x() {}\n// @param loop: f32 = 1\n").unwrap_err();
+        assert_eq!(err.line, 2);
+        assert!(err.message.contains("loop"));
+        assert!(parse_params("// @param padding: f32 = 1\n// @param my_loop: f32 = 2\n").is_ok());
     }
 }
