@@ -141,15 +141,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     ui.separator();
     ui.heading("Seed image");
-    ui.label(egui::RichText::new("Image → Seed grid from image…, or drop a PNG on the window.").weak());
+    ui.label(egui::RichText::new("Image > Seed grid from image…, or drop a PNG on the window.").weak());
     let mut reapply = false;
     ui.horizontal(|ui| {
         let is_lum = matches!(app.state.seed_mode, SeedMode::Luminance { .. });
-        if ui.selectable_label(is_lum, "brightness → on/off").clicked() && !is_lum {
+        if ui.selectable_label(is_lum, "brightness -> on/off").clicked() && !is_lum {
             app.state.seed_mode = SeedMode::Luminance { threshold: 0.5 };
             reapply = true;
         }
-        if ui.selectable_label(!is_lum, "RGBA → channels").clicked() && is_lum {
+        if ui.selectable_label(!is_lum, "RGBA -> channels").clicked() && is_lum {
             app.state.seed_mode = SeedMode::Channels;
             reapply = true;
         }
@@ -207,8 +207,12 @@ fn modulation_button(
     } else {
         egui::RichText::new("~").weak()
     };
-    ui.menu_button(label, |ui| {
-        ui.set_min_width(220.0);
+    // Keep the menu open while its buttons are clicked (egui closes menus on any button click
+    // by default); only a click outside dismisses it.
+    let config = egui::containers::menu::MenuConfig::new()
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(label).config(config).ui(ui, |ui| {
+        ui.set_min_width(300.0);
         match app.state.modulations.get_mut(&spec.name) {
             None => {
                 ui.label(egui::RichText::new("Modulate this value over time").small().weak());
@@ -220,13 +224,12 @@ fn modulation_button(
             Some(m) => {
                 egui::Grid::new(("lfo", &spec.name)).num_columns(2).show(ui, |ui| {
                     ui.label("wave");
-                    egui::ComboBox::from_id_salt(("lfo-wave", &spec.name))
-                        .selected_text(m.wave.label())
-                        .show_ui(ui, |ui| {
-                            for w in Wave::ALL {
-                                changed |= ui.selectable_value(&mut m.wave, w, w.label()).changed();
-                            }
-                        });
+                    // Inline buttons rather than a ComboBox: a nested popup would close this menu.
+                    ui.horizontal_wrapped(|ui| {
+                        for w in Wave::ALL {
+                            changed |= ui.selectable_value(&mut m.wave, w, w.label()).changed();
+                        }
+                    });
                     ui.end_row();
                     ui.label("freq (Hz)");
                     changed |= ui

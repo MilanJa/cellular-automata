@@ -31,7 +31,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
                 .weak(),
             );
             ui.horizontal(|ui| {
-                ui.label("Blend A → B");
+                ui.label("Blend A -> B");
                 let mut blend = app.state.blend;
                 if ui.add(egui::Slider::new(&mut blend, 0.0..=1.0)).changed() {
                     app.set_blend(blend);
