@@ -10,3 +10,9 @@ kind = "random"
 density = 0.3
 
 [params]
+
+[modulation.glow]
+wave = "sine"
+freq = 0.15
+amount = 0.35
+phase = 0.0

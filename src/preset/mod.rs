@@ -40,6 +40,9 @@ pub struct PresetMeta {
     pub init: InitPattern,
     #[serde(default)]
     pub params: BTreeMap<String, toml::Value>,
+    /// Time-driven modulation per param name (see `app::modulation`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modulation: BTreeMap<String, crate::app::modulation::Modulation>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -189,6 +192,7 @@ mod tests {
                 seed: 7,
                 init: InitPattern::Random { density: 0.3 },
                 params,
+                modulation: BTreeMap::new(),
             },
             rule: "fn rule() {}\n".into(),
             render: "fn shade() {}\n".into(),
@@ -332,5 +336,21 @@ mod tests {
         assert_eq!(v, toml::Value::Array(vec![toml::Value::Float(0.3), toml::Value::Float(1.0), toml::Value::Float(0.037)]));
         let text = toml::to_string(&toml::Table::from_iter([("fade".to_string(), param_value_to_toml(&ParamValue::F32(40.0)))])).unwrap();
         assert_eq!(text.trim(), "fade = 40.0");
+    }
+
+    #[test]
+    fn modulation_table_round_trips_and_defaults_to_empty() {
+        use crate::app::modulation::{Modulation, Wave};
+        let mut p = sample();
+        p.meta.modulation.insert(
+            "threshold".into(),
+            Modulation { wave: Wave::Sine, freq: 0.25, amount: 0.5, phase: 0.0, follow_sim: false },
+        );
+        let text = toml::to_string(&p.meta).unwrap();
+        assert!(text.contains("[modulation.threshold]"), "{text}");
+        let back: PresetMeta = toml::from_str(&text).unwrap();
+        assert_eq!(back, p.meta);
+        let plain: PresetMeta = toml::from_str(&toml::to_string(&sample().meta).unwrap()).unwrap();
+        assert!(plain.modulation.is_empty());
     }
 }

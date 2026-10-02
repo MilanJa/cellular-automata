@@ -98,6 +98,15 @@ Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule 
 whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
 how much the render side alone can do.
 
+## Animating parameters
+
+Every numeric slider has a **~** button. It opens a small panel where you pick a wave (sine,
+triangle, square, saw or smooth noise), a frequency in Hz, an amount (as a fraction of the
+slider's range) and a phase. The slider keeps setting the centre; the live value is shown next
+to it. By default the wave runs on the wall clock so a paused simulation still animates; tick
+*follow simulation* to make it pause with the simulation instead. Modulations are saved with
+the preset (`[modulation.<name>]` in `preset.toml`). Neon Life ships with a breathing `glow`.
+
 ## Painting
 
 Drag on the grid with the left mouse button to paint cells, right button to erase. **Brush** (under

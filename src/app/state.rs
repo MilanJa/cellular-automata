@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use web_time::Instant;
 
+use crate::app::modulation::Modulation;
 use crate::platform::SavedLocation;
 
 use crate::preset::{param_value_from_toml, param_value_to_toml, InitPattern, Preset, PresetMeta};
@@ -99,6 +100,8 @@ pub struct AppState {
     pub editor: EditorState,
     pub specs: Vec<ParamSpec>,
     pub values: BTreeMap<String, ParamValue>,
+    /// Active LFOs by param name.
+    pub modulations: BTreeMap<String, Modulation>,
     pub errors: Vec<Diagnostic>,
     /// True when anything savable changed since the preset was loaded or saved.
     pub modified: bool,
@@ -131,6 +134,7 @@ impl AppState {
             editor,
             specs,
             values,
+            modulations: BTreeMap::new(),
             errors: Vec::new(),
             modified: false,
             playing: true,
@@ -213,6 +217,7 @@ pub fn build_shaders(
 pub fn preset_to_state(
     preset: &Preset,
 ) -> (EditorState, SimConfig, u32, BTreeMap<String, toml::Value>) {
+    // Modulations travel separately through `LoadedPreset::modulations`.
     let m = &preset.meta;
     let editor = EditorState {
         rule: preset.rule.clone(),
@@ -245,6 +250,7 @@ pub struct LoadedPreset {
     pub rule: Assembled,
     pub render: Assembled,
     pub toml_params: BTreeMap<String, toml::Value>,
+    pub modulations: BTreeMap<String, Modulation>,
     pub name: String,
 }
 
@@ -261,6 +267,7 @@ pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderEr
         rule,
         render,
         toml_params,
+        modulations: preset.meta.modulation.clone(),
         name: preset.meta.name.clone(),
     })
 }
@@ -282,6 +289,12 @@ pub fn state_to_preset(state: &AppState) -> Preset {
             seed: c.seed,
             init: c.init.clone(),
             params,
+            modulation: state
+                .modulations
+                .iter()
+                .filter(|(name, _)| state.specs.iter().any(|s| &s.name == *name))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         },
         rule: state.editor.rule.clone(),
         render: state.editor.render.clone(),

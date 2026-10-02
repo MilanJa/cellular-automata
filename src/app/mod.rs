@@ -1,5 +1,6 @@
 //! The egui application: wires the editors, params, transport and presets to the simulation.
 
+pub mod modulation;
 pub mod state;
 mod ui_editor;
 mod ui_errors;
@@ -12,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use crate::platform::{self, SavedLocation};
 use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
 use crate::preset::Preset;
-use crate::shader::params::pack_params;
+use crate::shader::params::{pack_params, ParamValue};
 use crate::shader::validate::ShaderFile;
+use crate::app::modulation::modulated_values;
 use crate::sim::paint::{pointer_to_cell, Stroke};
 use crate::sim::Simulation;
 use crate::viewport::show_viewport;
@@ -44,6 +46,8 @@ pub struct App {
     strokes: Vec<Stroke>,
     /// Viewport rect from the previous frame, for mapping pointer positions.
     last_viewport: Option<egui::Rect>,
+    /// Wall clock for modulations that do not follow simulation time.
+    launched: web_time::Instant,
 }
 
 impl App {
@@ -95,6 +99,7 @@ impl App {
             save_dialog: None,
             strokes: Vec::new(),
             last_viewport: None,
+            launched: web_time::Instant::now(),
         };
         app.state.saved_presets = platform::list_saved();
         app.apply_shaders_with_toml(&toml_params);
@@ -133,6 +138,7 @@ impl App {
         self.state.source = source;
         self.state.values = resolve_values(&loaded.specs, &loaded.toml_params, &BTreeMap::new());
         self.state.specs = loaded.specs;
+        self.state.modulations = loaded.modulations;
         self.state.errors.clear();
         self.state.modified = false;
         self.state.started = web_time::Instant::now();
@@ -178,9 +184,26 @@ impl App {
         }
     }
 
+    /// Uploads the current param values with any active modulations applied.
     pub(crate) fn push_params(&self) {
-        let packed = pack_params(&self.state.specs, &self.state.values);
+        let values = self.effective_values();
+        let packed = pack_params(&self.state.specs, &values);
         self.sim.lock().unwrap().set_params(packed);
+    }
+
+    /// Slider values with the LFOs applied for this instant.
+    pub(crate) fn effective_values(&self) -> BTreeMap<String, ParamValue> {
+        if self.state.modulations.is_empty() {
+            return self.state.values.clone();
+        }
+        let wall = self.launched.elapsed().as_secs_f32();
+        let sim = self.state.started.elapsed().as_secs_f32();
+        modulated_values(&self.state.specs, &self.state.values, &self.state.modulations, wall, sim)
+    }
+
+    /// True when some modulated param is one the shaders actually declare.
+    fn modulation_active(&self) -> bool {
+        self.state.modulations.keys().any(|k| self.state.specs.iter().any(|s| &s.name == k))
     }
 
     pub(crate) fn apply_settings_and_reset(&mut self) {
@@ -352,6 +375,9 @@ impl eframe::App for App {
         }
         self.poll_import();
         self.poll_export_image();
+        if self.modulation_active() {
+            self.push_params();
+        }
         ui_topbar::save_dialog(self, &ctx);
         // Global shortcut: Ctrl/Cmd+Enter applies shaders. Consume it before the editors see it.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
@@ -390,7 +416,7 @@ impl eframe::App for App {
             self.collect_strokes(&response, rect);
         });
 
-        if self.state.playing || self.export_pending() {
+        if self.state.playing || self.export_pending() || self.modulation_active() {
             ctx.request_repaint();
         }
     }
