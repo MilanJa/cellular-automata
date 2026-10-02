@@ -52,3 +52,12 @@ opt-level = 3
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# Web bundle: `trunk build --release --cargo-profile web`. The GPU does the heavy work, so a
+# smaller wasm (faster download and compile) beats CPU micro-optimisation here.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

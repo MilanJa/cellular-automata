@@ -121,8 +121,11 @@ Build it yourself:
 
     rustup target add wasm32-unknown-unknown
     cargo install trunk
-    trunk serve            # http://127.0.0.1:8080, rebuilds on change
-    trunk build --release  # static files in dist/
+    trunk serve                                  # http://127.0.0.1:8080, rebuilds on change
+    trunk build --release --cargo-profile web    # static files in dist/, size-optimised
+
+The `web` cargo profile uses `opt-level = "z"` with fat LTO: the GPU does the heavy lifting, so
+the smaller bundle (faster download and compile) is worth more than CPU micro-optimisation.
 
 ## Tests
 
