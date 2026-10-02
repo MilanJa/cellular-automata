@@ -98,6 +98,14 @@ Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule 
 whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
 how much the render side alone can do.
 
+## Painting
+
+Drag on the grid with the left mouse button to paint cells, right button to erase. **Brush** (under
+Grid) sets the radius in cells and the value written, default `on()` = (1, 0, 0, 1); for a
+continuous rule such as Gray-Scott, paint into the channel the rule reads (for example
+`0, 1, 0, 1` to seed V). In 1D mode a stroke lands on the most recently written row, which is
+what the next generation reads. Painting works while paused.
+
 ## Exporting an image
 
 **Image → 1× / 2× / 4×** saves the current grid as a lossless PNG, coloured by the render shader,

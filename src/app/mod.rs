@@ -14,6 +14,7 @@ use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
 use crate::preset::Preset;
 use crate::shader::params::pack_params;
 use crate::shader::validate::ShaderFile;
+use crate::sim::paint::{pointer_to_cell, Stroke};
 use crate::sim::Simulation;
 use crate::viewport::show_viewport;
 use state::{
@@ -39,6 +40,10 @@ pub struct App {
     /// Steps-per-second meter for the status line.
     pub(crate) rate: RateMeter,
     pub(crate) save_dialog: Option<SaveDialog>,
+    /// Strokes gathered this frame; handed to the viewport callback.
+    strokes: Vec<Stroke>,
+    /// Viewport rect from the previous frame, for mapping pointer positions.
+    last_viewport: Option<egui::Rect>,
 }
 
 impl App {
@@ -88,6 +93,8 @@ impl App {
             pending_cursor: None,
             rate: RateMeter::new(web_time::Instant::now(), 0),
             save_dialog: None,
+            strokes: Vec::new(),
+            last_viewport: None,
         };
         app.state.saved_presets = platform::list_saved();
         app.apply_shaders_with_toml(&toml_params);
@@ -302,6 +309,33 @@ impl App {
         self.state.saved_presets = platform::list_saved();
     }
 
+    /// Turns a drag or click on the viewport into brush strokes for the next frame.
+    fn collect_strokes(&mut self, response: &egui::Response, rect: egui::Rect) {
+        let down = response.dragged() || response.is_pointer_button_down_on();
+        if !down {
+            return;
+        }
+        let Some(pos) = response.interact_pointer_pos() else { return };
+        let (primary, secondary) = response
+            .ctx
+            .input(|i| (i.pointer.primary_down(), i.pointer.secondary_down()));
+        let value = if secondary && !primary {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            self.state.brush_value
+        };
+        let (w, h) = {
+            let sim = self.sim.lock().unwrap();
+            let c = sim.config();
+            (c.width, c.height)
+        };
+        let r = (rect.min.x, rect.min.y, rect.width(), rect.height());
+        if let Some((x, y)) = pointer_to_cell(pos.x, pos.y, r, w, h) {
+            self.strokes.push(Stroke { x, y, radius: self.state.brush_radius, value });
+            response.ctx.request_repaint();
+        }
+    }
+
     /// Shows a non-shader message in the error panel.
     pub(crate) fn report(&mut self, message: String) {
         self.state.errors = vec![Diagnostic::General(message)];
@@ -350,7 +384,10 @@ impl eframe::App for App {
             };
             self.state.step_once = false;
             let time = self.state.started.elapsed().as_secs_f32();
-            show_viewport(ui, &self.sim, steps, time);
+            let strokes = std::mem::take(&mut self.strokes);
+            let (rect, response) = show_viewport(ui, &self.sim, steps, time, strokes);
+            self.last_viewport = Some(rect);
+            self.collect_strokes(&response, rect);
         });
 
         if self.state.playing || self.export_pending() {

@@ -12,6 +12,7 @@ use crate::sim::export::{
     clamp_scale, encode_png, padded_bytes_per_row, to_rgba, unpad_rows, ExportedImage,
 };
 use crate::sim::init::generate_init;
+use crate::sim::paint::{brush_bbox, PaintUniform, Stroke, PAINT_WGSL};
 use crate::sim::row::{clamp_size, plan_row, RowPlan, WORKGROUP};
 use crate::sim::uniforms::{Globals, ParamsData};
 
@@ -30,6 +31,8 @@ struct Textures {
     compute_bind_groups: [wgpu::BindGroup; 2],
     /// `[i]` reads `tex[i]`.
     render_bind_groups: [wgpu::BindGroup; 2],
+    /// `[i]` writes `tex[i]` (mouse painting into the current state).
+    paint_bind_groups: [wgpu::BindGroup; 2],
 }
 
 pub struct Simulation {
@@ -39,6 +42,9 @@ pub struct Simulation {
     config: SimConfig,
     compute_layout: wgpu::BindGroupLayout,
     render_layout: wgpu::BindGroupLayout,
+    paint_layout: wgpu::BindGroupLayout,
+    paint_pipeline: wgpu::ComputePipeline,
+    paint_buf: wgpu::Buffer,
     compute_pipeline_layout: wgpu::PipelineLayout,
     render_pipeline_layout: wgpu::PipelineLayout,
     globals_buf: wgpu::Buffer,
@@ -120,6 +126,45 @@ impl Simulation {
             label: Some("ca render layout"),
             entries: &[sampled(wgpu::ShaderStages::FRAGMENT), uniform(2), uniform(3)],
         });
+        let paint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ca paint layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                uniform(1),
+            ],
+        });
+        let paint_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ca paint"),
+            source: wgpu::ShaderSource::Wgsl(PAINT_WGSL.into()),
+        });
+        let paint_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ca paint pipeline layout"),
+            bind_group_layouts: &[Some(&paint_layout)],
+            immediate_size: 0,
+        });
+        let paint_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ca paint pipeline"),
+            layout: Some(&paint_pipeline_layout),
+            module: &paint_module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let paint_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ca paint uniform"),
+            size: std::mem::size_of::<PaintUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let compute_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("ca compute pipeline layout"),
@@ -155,8 +200,10 @@ impl Simulation {
             &device,
             &compute_layout,
             &render_layout,
+            &paint_layout,
             &globals_buf,
             &params_buf,
+            &paint_buf,
             config.width,
             config.height,
         );
@@ -180,6 +227,9 @@ impl Simulation {
             config,
             compute_layout,
             render_layout,
+            paint_layout,
+            paint_pipeline,
+            paint_buf,
             compute_pipeline_layout,
             render_pipeline_layout,
             globals_buf,
@@ -339,8 +389,10 @@ impl Simulation {
                 &self.device,
                 &self.compute_layout,
                 &self.render_layout,
+                &self.paint_layout,
                 &self.globals_buf,
                 &self.params_buf,
+                &self.paint_buf,
                 config.width,
                 config.height,
             );
@@ -502,6 +554,50 @@ impl Simulation {
         }
     }
 
+    /// Records brush strokes into the *current* state texture. In 1D mode a stroke paints its
+    /// x-range onto the most recently written row, which is what the next generation reads.
+    pub fn paint(&mut self, encoder: &mut wgpu::CommandEncoder, strokes: &[Stroke]) {
+        let (w, h) = (self.config.width, self.config.height);
+        for stroke in strokes {
+            let (sy, bbox) = match self.config.mode {
+                Mode::TwoD => (stroke.y, brush_bbox(stroke.x, stroke.y, stroke.radius, w, h)),
+                Mode::OneD => {
+                    let row = self.globals.row.saturating_sub(1).min(h.saturating_sub(1));
+                    let bb = brush_bbox(stroke.x, row as i32, stroke.radius, w, h)
+                        .map(|(x0, _, bw, _)| (x0, row, bw, 1));
+                    (row as i32, bb)
+                }
+            };
+            let Some((x0, y0, bw, bh)) = bbox else { continue };
+            let uniform = PaintUniform {
+                origin: [x0 as i32, y0 as i32],
+                center: [stroke.x as f32, sy as f32],
+                radius: stroke.radius.max(0.5),
+                _pad: [0.0; 3],
+                value: stroke.value,
+            };
+            let staging = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ca paint staging"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::COPY_SRC,
+            });
+            encoder.copy_buffer_to_buffer(
+                &staging,
+                0,
+                &self.paint_buf,
+                0,
+                std::mem::size_of::<PaintUniform>() as u64,
+            );
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ca paint"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.paint_pipeline);
+            pass.set_bind_group(0, &self.textures.paint_bind_groups[self.cur], &[]);
+            pass.dispatch_workgroups(bw.div_ceil(WORKGROUP), bh.div_ceil(WORKGROUP), 1);
+        }
+    }
+
     /// Records `n` simulation steps into `encoder`. With `n == 0` only the globals (notably
     /// `time`) are refreshed, so time-based render shaders keep moving while paused.
     pub fn step(&mut self, encoder: &mut wgpu::CommandEncoder, n: u32) {
@@ -629,12 +725,15 @@ fn copy_rows(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_textures(
     device: &wgpu::Device,
     compute_layout: &wgpu::BindGroupLayout,
     render_layout: &wgpu::BindGroupLayout,
+    paint_layout: &wgpu::BindGroupLayout,
     globals_buf: &wgpu::Buffer,
     params_buf: &wgpu::Buffer,
+    paint_buf: &wgpu::Buffer,
     width: u32,
     height: u32,
 ) -> Textures {
@@ -687,9 +786,23 @@ fn create_textures(
             ],
         })
     };
+    let paint_bg = |dst: usize| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ca paint bg"),
+            layout: paint_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&views[dst]),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: paint_buf.as_entire_binding() },
+            ],
+        })
+    };
     let compute_bind_groups = [compute_bg(0), compute_bg(1)];
     let render_bind_groups = [render_bg(0), render_bg(1)];
-    Textures { tex, compute_bind_groups, render_bind_groups }
+    let paint_bind_groups = [paint_bg(0), paint_bg(1)];
+    Textures { tex, compute_bind_groups, render_bind_groups, paint_bind_groups }
 }
 
 /// GPU tests: need a real adapter, so they are `#[ignore]`d for CI. Run with
@@ -899,6 +1012,32 @@ mod gpu_tests {
         let lit = buf[..info.buffer_size()].chunks(4).filter(|px| px[0] > 0 || px[1] > 0 || px[2] > 0).count();
         assert!(lit > 0, "some cells must be coloured");
         assert!(!sim.export_pending());
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn painting_writes_a_disc_into_the_current_texture() {
+        let _gpu = gpu_lock();
+        let Some(mut sim) = sim_with(SimConfig {
+            mode: Mode::TwoD,
+            width: 32,
+            height: 32,
+            init: InitPattern::Blank,
+            seed: 1,
+        }) else {
+            return;
+        };
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        sim.paint(&mut enc, &[Stroke { x: 16, y: 16, radius: 3.0, value: [1.0, 0.0, 0.0, 1.0] }]);
+        sim.queue.submit([enc.finish()]);
+        let data = read_back(&sim, sim.cur);
+        let at = |x: usize, y: usize| data[(y * 32 + x) * 4];
+        assert_eq!(at(16, 16), 1.0, "centre is painted");
+        assert_eq!(at(16, 19), 1.0, "radius 3 reaches 3 cells away");
+        assert_eq!(at(16, 21), 0.0, "5 cells away is untouched");
+        assert_eq!(at(0, 0), 0.0);
+        let painted = (0..32 * 32).filter(|i| data[i * 4] > 0.5).count();
+        assert!((25..=37).contains(&painted), "about pi*r^2 cells: {painted}");
     }
 
     #[test]

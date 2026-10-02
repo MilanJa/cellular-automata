@@ -111,6 +111,9 @@ pub struct AppState {
     pub source: PresetSource,
     pub saved_presets: Vec<(String, SavedLocation)>,
     pub started: Instant,
+    /// Mouse brush: radius in cells and the value painted with the left button.
+    pub brush_radius: f32,
+    pub brush_value: [f32; 4],
 }
 
 impl AppState {
@@ -138,6 +141,8 @@ impl AppState {
             source,
             saved_presets: Vec::new(),
             started: Instant::now(),
+            brush_radius: 2.0,
+            brush_value: [1.0, 0.0, 0.0, 1.0],
         }
     }
 }

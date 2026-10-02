@@ -116,4 +116,23 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if ui.button("Apply grid settings & reset").clicked() {
         app.apply_settings_and_reset();
     }
+
+    ui.separator();
+    ui.heading("Brush");
+    ui.label(egui::RichText::new("Drag on the grid to paint; right button erases.").weak());
+    egui::Grid::new("brush").num_columns(2).show(ui, |ui| {
+        ui.label("radius");
+        ui.add(egui::Slider::new(&mut app.state.brush_radius, 0.5..=32.0).logarithmic(true));
+        ui.end_row();
+        ui.label("value");
+        ui.horizontal(|ui| {
+            for v in app.state.brush_value.iter_mut() {
+                ui.add(egui::DragValue::new(v).speed(0.01));
+            }
+            if ui.small_button("on()").on_hover_text("(1, 0, 0, 1)").clicked() {
+                app.state.brush_value = [1.0, 0.0, 0.0, 1.0];
+            }
+        });
+        ui.end_row();
+    });
 }

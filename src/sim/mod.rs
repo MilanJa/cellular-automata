@@ -1,5 +1,6 @@
 pub mod export;
 pub mod init;
+pub mod paint;
 pub mod row;
 pub mod simulation;
 pub mod uniforms;

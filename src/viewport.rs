@@ -6,6 +6,7 @@ use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor
 use eframe::wgpu;
 use egui::PaintCallbackInfo;
 
+use crate::sim::paint::Stroke;
 use crate::sim::Simulation;
 
 /// Largest `grid_aspect` rectangle centred inside a `viewport_w x viewport_h` box.
@@ -26,6 +27,8 @@ pub struct ViewportCallback {
     pub steps: u32,
     pub time: f32,
     pub grid_aspect: f32,
+    /// Brush strokes to apply before this frame's steps.
+    pub strokes: Vec<Stroke>,
 }
 
 impl CallbackTrait for ViewportCallback {
@@ -39,6 +42,9 @@ impl CallbackTrait for ViewportCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         let mut sim = self.sim.lock().unwrap();
         sim.set_time(self.time);
+        if !self.strokes.is_empty() {
+            sim.paint(egui_encoder, &self.strokes);
+        }
         sim.step(egui_encoder, self.steps);
         Vec::new()
     }
@@ -61,23 +67,25 @@ impl CallbackTrait for ViewportCallback {
 }
 
 /// Allocates the remaining space in `ui`, paints a dark background and schedules the GPU callback.
+/// Returns the viewport rect and its interaction response (click and drag for painting).
 pub fn show_viewport(
     ui: &mut egui::Ui,
     sim: &Arc<Mutex<Simulation>>,
     steps: u32,
     time: f32,
-) -> egui::Rect {
+    strokes: Vec<Stroke>,
+) -> (egui::Rect, egui::Response) {
     let size = ui.available_size();
-    let (rect, _response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(12));
     let grid_aspect = {
         let s = sim.lock().unwrap();
         let c = s.config();
         c.width as f32 / c.height.max(1) as f32
     };
-    let cb = ViewportCallback { sim: sim.clone(), steps, time, grid_aspect };
+    let cb = ViewportCallback { sim: sim.clone(), steps, time, grid_aspect, strokes };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, cb));
-    rect
+    (rect, response)
 }
 
 #[cfg(test)]
