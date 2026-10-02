@@ -94,7 +94,9 @@ generations back. `prev_cell` always reads the right row.
 A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`. Folders under
 `./presets` appear in the dropdown (click **Rescan** after adding one). **Save** writes back to
 a preset's folder; **Save as…** picks a new folder. Built-ins: Rule 30, Rule 110, Game of
-Life, Gray-Scott reaction-diffusion.
+Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule is plain Life but
+whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
+how much the render side alone can do.
 
 ## Exporting an image
 

@@ -27,6 +27,7 @@ pub const BUILTINS: &[Builtin] = &[
     embedded!("life", "life"),
     embedded!("lifelike", "lifelike"),
     embedded!("gray_scott", "gray_scott"),
+    embedded!("neon_life", "neon_life"),
 ];
 
 /// Commented starting points for new work, offered by the "New" menu.
@@ -36,6 +37,7 @@ pub const TEMPLATES: &[Builtin] = &[
     embedded!("elementary1d", "templates/elementary1d"),
     embedded!("continuous2d", "templates/continuous2d"),
     embedded!("render_only", "templates/render_only"),
+    embedded!("neon_life", "neon_life"),
 ];
 
 pub fn load_builtin(b: &Builtin) -> Preset {
@@ -74,21 +76,21 @@ mod tests {
     }
 
     #[test]
-    fn there_are_five_builtins_with_unique_ids() {
-        assert_eq!(BUILTINS.len(), 5);
+    fn builtins_have_unique_ids() {
+        assert_eq!(BUILTINS.len(), 6);
         let mut ids: Vec<_> = BUILTINS.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 5);
+        assert_eq!(ids.len(), 6);
     }
 
     #[test]
-    fn there_are_five_templates_with_unique_ids() {
-        assert_eq!(TEMPLATES.len(), 5);
+    fn templates_have_unique_ids() {
+        assert_eq!(TEMPLATES.len(), 6);
         let mut ids: Vec<_> = TEMPLATES.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 5);
+        assert_eq!(ids.len(), 6);
     }
 
     #[test]

@@ -1,0 +1,12 @@
+name = "Neon Life"
+mode = "2d"
+width = 128
+height = 128
+steps_per_frame = 1
+seed = 21
+
+[init]
+kind = "random"
+density = 0.3
+
+[params]
