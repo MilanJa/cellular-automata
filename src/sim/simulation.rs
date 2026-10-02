@@ -9,7 +9,7 @@ use crate::shader::assemble::Assembled;
 use crate::shader::params::MAX_PARAMS;
 use crate::shader::validate::{validate, ShaderError, ShaderFile};
 use crate::sim::init::generate_init;
-use crate::sim::row::{clamp_size, plan_row, WORKGROUP};
+use crate::sim::row::{clamp_size, plan_row, RowPlan, WORKGROUP};
 use crate::sim::uniforms::{Globals, ParamsData};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +46,8 @@ pub struct Simulation {
     compute: Option<wgpu::ComputePipeline>,
     render: Option<wgpu::RenderPipeline>,
     globals: Globals,
+    /// Set by wgpu's device-lost callback; drained by the app once per frame.
+    device_lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Simulation {
@@ -124,7 +126,9 @@ impl Simulation {
         let globals_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ca globals"),
             contents: bytemuck::bytes_of(&globals),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
         });
         let params: ParamsData = [[0; 4]; MAX_PARAMS];
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -145,6 +149,15 @@ impl Simulation {
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             log::error!("uncaptured wgpu error: {e}");
         }));
+        let device_lost: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+        {
+            let flag = device_lost.clone();
+            device.set_device_lost_callback(move |reason, message| {
+                let text = format!("GPU device lost ({reason:?}): {message}");
+                log::error!("{text}");
+                *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+            });
+        }
         let mut sim = Simulation {
             device,
             queue,
@@ -161,9 +174,15 @@ impl Simulation {
             compute: None,
             render: None,
             globals,
+            device_lost,
         };
         sim.reset();
         sim
+    }
+
+    /// Returns the device-lost message once, if the device was lost since the last call.
+    pub fn take_device_lost(&self) -> Option<String> {
+        self.device_lost.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub fn config(&self) -> &SimConfig {
@@ -240,23 +259,6 @@ impl Simulation {
 
     pub fn set_time(&mut self, seconds: f32) {
         self.globals.time = seconds;
-    }
-
-    /// Records a copy of the current `Globals` into the uniform buffer *inside* the encoder, so
-    /// that several steps recorded into one submission each see their own globals.
-    fn upload_globals_in_encoder(&self, encoder: &mut wgpu::CommandEncoder) {
-        let staging = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ca globals staging"),
-            contents: bytemuck::bytes_of(&self.globals),
-            usage: wgpu::BufferUsages::COPY_SRC,
-        });
-        encoder.copy_buffer_to_buffer(
-            &staging,
-            0,
-            &self.globals_buf,
-            0,
-            std::mem::size_of::<Globals>() as u64,
-        );
     }
 
     fn backend_error(file: ShaderFile, err: Option<wgpu::Error>) -> Result<(), Vec<ShaderError>> {
@@ -368,50 +370,72 @@ impl Simulation {
         }
     }
 
-    /// Records `n` simulation steps into `encoder`.
+    /// Records `n` simulation steps into `encoder`. With `n == 0` only the globals (notably
+    /// `time`) are refreshed, so time-based render shaders keep moving while paused.
     pub fn step(&mut self, encoder: &mut wgpu::CommandEncoder, n: u32) {
-        let Some(pipeline) = &self.compute else { return };
+        if n == 0 || self.compute.is_none() {
+            self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+            return;
+        }
         let (w, h) = (self.config.width, self.config.height);
+
+        // Pass 1: decide every step's globals and row plan, advancing the CPU-side state.
+        let mut snapshots: Vec<Globals> = Vec::with_capacity(n as usize);
+        let mut plans: Vec<Option<RowPlan>> = Vec::with_capacity(n as usize);
         for _ in 0..n {
-            let src = self.cur;
-            let dst = 1 - self.cur;
-            match self.config.mode {
-                Mode::TwoD => {
-                    self.upload_globals_in_encoder(encoder);
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("ca step"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, &self.textures.compute_bind_groups[src], &[]);
-                    pass.dispatch_workgroups(w.div_ceil(WORKGROUP), h.div_ceil(WORKGROUP), 1);
-                }
+            let plan = match self.config.mode {
+                Mode::TwoD => None,
                 Mode::OneD => {
                     let plan = plan_row(self.globals.row, h);
-                    // Carry the unchanged rows from src to dst so dst holds the full diagram.
-                    if plan.scroll {
-                        copy_rows(encoder, &self.textures.tex[src], 1, &self.textures.tex[dst], 0, w, h - 1);
-                    } else {
-                        copy_rows(encoder, &self.textures.tex[src], 0, &self.textures.tex[dst], 0, w, plan.write_row);
-                    }
                     self.globals.row = plan.write_row;
                     self.globals.prev_row = plan.read_row;
-                    self.upload_globals_in_encoder(encoder);
-                    {
-                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("ca step 1d"),
-                            timestamp_writes: None,
-                        });
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, &self.textures.compute_bind_groups[src], &[]);
-                        pass.dispatch_workgroups(w.div_ceil(WORKGROUP), 1, 1);
-                    }
-                    self.globals.row = plan.next_row;
+                    Some(plan)
                 }
+            };
+            snapshots.push(self.globals);
+            plans.push(plan);
+            if let Some(plan) = plan {
+                self.globals.row = plan.next_row;
             }
-            self.cur = dst;
             self.globals.frame = self.globals.frame.wrapping_add(1);
         }
+
+        // One staging buffer holds every step's globals; each step copies its slice in.
+        let staging = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ca globals staging"),
+            contents: bytemuck::cast_slice(&snapshots),
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+        let size = std::mem::size_of::<Globals>() as u64;
+        let pipeline = self.compute.as_ref().expect("checked above");
+
+        // Pass 2: record copies and dispatches.
+        let mut cur = self.cur;
+        for (i, plan) in plans.iter().enumerate() {
+            let (src, dst) = (cur, 1 - cur);
+            if let Some(plan) = plan {
+                // Carry the unchanged rows from src to dst so dst holds the full diagram.
+                if plan.scroll {
+                    copy_rows(encoder, &self.textures.tex[src], 1, &self.textures.tex[dst], 0, w, h - 1);
+                } else {
+                    copy_rows(encoder, &self.textures.tex[src], 0, &self.textures.tex[dst], 0, w, plan.write_row);
+                }
+            }
+            encoder.copy_buffer_to_buffer(&staging, i as u64 * size, &self.globals_buf, 0, size);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ca step"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &self.textures.compute_bind_groups[src], &[]);
+            match plan {
+                None => pass.dispatch_workgroups(w.div_ceil(WORKGROUP), h.div_ceil(WORKGROUP), 1),
+                Some(_) => pass.dispatch_workgroups(w.div_ceil(WORKGROUP), 1, 1),
+            }
+            drop(pass);
+            cur = dst;
+        }
+        self.cur = cur;
     }
 
     /// Draws the current state with the render pipeline into the active render pass.
@@ -679,5 +703,39 @@ mod gpu_tests {
         assert!(sim.config().width <= sim.device.limits().max_texture_dimension_2d);
         assert_eq!(sim.config().height, 4);
         assert_eq!(sim.frame(), 0);
+    }
+
+    fn read_globals(sim: &Simulation) -> Globals {
+        let buf = sim.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(&sim.globals_buf, 0, &buf, 0, std::mem::size_of::<Globals>() as u64);
+        sim.queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+        let view = slice.get_mapped_range().expect("buffer mapped");
+        *bytemuck::from_bytes::<Globals>(&view[..])
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn time_reaches_the_gpu_while_paused_and_frame_counts_match_after_steps() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let (rule, render) = assembled_for(&p.rule, &p.render);
+        let Some(mut sim) = sim_with(config(Mode::TwoD, 16, 16)) else { return };
+        sim.set_pipelines(&rule, &render).unwrap();
+        sim.set_time(5.5);
+        assert!(step_and_check(&mut sim, 0).is_none());
+        assert_eq!(read_globals(&sim).time, 5.5, "paused: time must still be uploaded");
+        assert!(step_and_check(&mut sim, 7).is_none());
+        let g = read_globals(&sim);
+        assert_eq!(g.frame, 6, "the buffer holds the globals of the last recorded step");
+        assert_eq!(sim.frame(), 7);
     }
 }
