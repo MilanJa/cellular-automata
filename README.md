@@ -106,7 +106,26 @@ Life, Gray-Scott reaction-diffusion.
 | steps/frame | simulation steps per rendered frame |
 | Reset | apply grid settings (mode, size, init pattern, seed) and re-initialise |
 
+## Web version
+
+The same app runs in the browser with WebGPU (recent Chrome or Edge, Firefox 141+, Safari 26+).
+Every push to `main` publishes it to https://milanja.github.io/cellular-automata/ .
+Add `?preset=rule30` to the URL to start on a built-in.
+
+Differences from the desktop build: presets are saved in the browser's local storage
+(the "Browser storage" section of the dropdown) instead of folders, and **Export** / **Import**
+move a single `*.capreset.toml` bundle in and out. Export and Import exist on the desktop too, so
+a preset can travel between the two.
+
+Build it yourself:
+
+    rustup target add wasm32-unknown-unknown
+    cargo install trunk
+    trunk serve            # http://127.0.0.1:8080, rebuilds on change
+    trunk build --release  # static files in dist/
+
 ## Tests
 
-    cargo test                                  # no GPU needed
-    cargo test gpu_tests -- --ignored           # headless GPU tests (need an adapter)
+    cargo test                                        # no GPU needed
+    cargo test gpu_tests -- --ignored                 # headless GPU tests (need an adapter)
+    cargo clippy --target wasm32-unknown-unknown      # the web build must stay warning-free

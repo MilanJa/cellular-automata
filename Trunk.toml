@@ -1,0 +1,7 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+# Trunk serves with the right MIME type for .wasm and reloads on change.
+port = 8080

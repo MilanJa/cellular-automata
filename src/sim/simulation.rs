@@ -287,7 +287,7 @@ impl Simulation {
             label: Some(file.label()),
             source: wgpu::ShaderSource::Wgsl(assembled.source.as_str().into()),
         });
-        Self::backend_error(file, pollster::block_on(scope.pop()))?;
+        Self::backend_error(file, pop_scope(scope))?;
         Ok(module)
     }
 
@@ -303,7 +303,7 @@ impl Simulation {
             compilation_options: Default::default(),
             cache: None,
         });
-        Self::backend_error(file, pollster::block_on(scope.pop()))?;
+        Self::backend_error(file, pop_scope(scope))?;
         Ok(pipeline)
     }
 
@@ -339,7 +339,7 @@ impl Simulation {
             multiview_mask: None,
             cache: None,
         });
-        Self::backend_error(file, pollster::block_on(scope.pop()))?;
+        Self::backend_error(file, pop_scope(scope))?;
         Ok(pipeline)
     }
 
@@ -446,6 +446,20 @@ impl Simulation {
         pass.set_bind_group(0, &self.textures.render_bind_groups[self.cur], &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+/// Resolves a validation error scope. In the browser the result is a promise that cannot be
+/// awaited synchronously, so the scope is simply closed; naga validation already rejects what
+/// the device cannot run and anything else reaches the uncaptured-error handler (console).
+#[cfg(not(target_arch = "wasm32"))]
+fn pop_scope(scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
+    pollster::block_on(scope.pop())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pop_scope(scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
+    drop(scope);
+    None
 }
 
 fn mode_code(mode: Mode) -> u32 {

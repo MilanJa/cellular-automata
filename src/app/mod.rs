@@ -7,11 +7,11 @@ mod ui_params;
 mod ui_topbar;
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::platform::{self, SavedLocation};
 use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
-use crate::preset::{preset_exists, scan_presets_dir, slug, Preset};
+use crate::preset::Preset;
 use crate::shader::params::pack_params;
 use crate::shader::validate::ShaderFile;
 use crate::sim::Simulation;
@@ -21,8 +21,15 @@ use state::{
     state_to_preset, AppState, Diagnostic, PresetSource, RateMeter,
 };
 
-const PRESETS_DIR: &str = "presets";
 const DEFAULT_BUILTIN: usize = 2; // Game of Life
+
+/// The in-app "save to browser" prompt (the web has no folder picker).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SaveDialog {
+    pub name: String,
+    /// Set once the user has seen the "already exists" notice; the next Save overwrites.
+    pub confirm_overwrite: bool,
+}
 
 pub struct App {
     sim: Arc<Mutex<Simulation>>,
@@ -31,6 +38,7 @@ pub struct App {
     pending_cursor: Option<(ShaderFile, usize)>,
     /// Steps-per-second meter for the status line.
     pub(crate) rate: RateMeter,
+    pub(crate) save_dialog: Option<SaveDialog>,
 }
 
 impl App {
@@ -38,24 +46,29 @@ impl App {
         Self::with_preset(cc, None)
     }
 
-    /// `start` is a built-in id (e.g. `rule30`) or a preset folder; `None` loads Game of Life.
+    /// `start` is a built-in id (e.g. `rule30`) or, on the desktop, a preset folder;
+    /// `None` loads Game of Life.
     pub fn with_preset(cc: &eframe::CreationContext<'_>, start: Option<&str>) -> Self {
         let rs = cc
             .wgpu_render_state
             .as_ref()
             .expect("wgpu render state (the app requires the wgpu backend)");
         let mut start_error = None;
+        let default = || (load_builtin(&BUILTINS[DEFAULT_BUILTIN]), PresetSource::Builtin(DEFAULT_BUILTIN));
         let (preset, source) = match start {
-            None => (load_builtin(&BUILTINS[DEFAULT_BUILTIN]), PresetSource::Builtin(DEFAULT_BUILTIN)),
+            None => default(),
             Some(id) => match BUILTINS.iter().position(|b| b.id == id) {
                 Some(i) => (load_builtin(&BUILTINS[i]), PresetSource::Builtin(i)),
-                None => match Preset::load_dir(Path::new(id)) {
-                    Ok(p) => (p, PresetSource::Disk(Path::new(id).to_path_buf())),
-                    Err(e) => {
-                        start_error = Some(format!("could not load preset `{id}`: {e:#}"));
-                        (load_builtin(&BUILTINS[DEFAULT_BUILTIN]), PresetSource::Builtin(DEFAULT_BUILTIN))
+                None => {
+                    let location = SavedLocation::Folder(std::path::PathBuf::from(id));
+                    match platform::load_saved(&location) {
+                        Ok(p) => (p, PresetSource::Saved(location)),
+                        Err(e) => {
+                            start_error = Some(format!("could not load preset `{id}`: {e:#}"));
+                            default()
+                        }
                     }
-                },
+                }
             },
         };
         let (editor, config, spf, toml_params) = preset_to_state(&preset);
@@ -73,9 +86,10 @@ impl App {
             sim: Arc::new(Mutex::new(sim)),
             state,
             pending_cursor: None,
-            rate: RateMeter::new(std::time::Instant::now(), 0),
+            rate: RateMeter::new(web_time::Instant::now(), 0),
+            save_dialog: None,
         };
-        app.state.disk_presets = scan_presets_dir(Path::new(PRESETS_DIR));
+        app.state.saved_presets = platform::list_saved();
         app.apply_shaders_with_toml(&toml_params);
         if let Some(msg) = start_error {
             app.report(msg);
@@ -114,7 +128,7 @@ impl App {
         self.state.specs = loaded.specs;
         self.state.errors.clear();
         self.state.modified = false;
-        self.state.started = std::time::Instant::now();
+        self.state.started = web_time::Instant::now();
         self.push_params();
     }
 
@@ -125,6 +139,13 @@ impl App {
         preset.meta.name = format!("Untitled ({})", preset.meta.name);
         self.load_preset(preset, PresetSource::Template(index));
         self.state.modified = true;
+    }
+
+    pub(crate) fn load_saved(&mut self, location: SavedLocation) {
+        match platform::load_saved(&location) {
+            Ok(p) => self.load_preset(p, PresetSource::Saved(location)),
+            Err(e) => self.report(format!("load failed: {e:#}")),
+        }
     }
 
     pub(crate) fn apply_shaders(&mut self) {
@@ -160,55 +181,97 @@ impl App {
         sim.reconfigure(self.state.pending.clone());
         self.state.pending = sim.config().clone(); // reflect clamping
         drop(sim);
-        self.state.started = std::time::Instant::now();
+        self.state.started = web_time::Instant::now();
     }
 
+    /// Save in place when the preset already has a home; otherwise behave like Save As.
     pub(crate) fn save(&mut self) {
         match self.state.source.clone() {
-            PresetSource::Disk(path) => self.save_to(&path),
+            PresetSource::Saved(location) => self.save_to(&location),
             _ => self.save_as(),
         }
     }
 
-    /// Asks for a parent folder and saves into `<parent>/<slug(name)>/`, confirming first when
-    /// that folder already holds a preset.
+    /// Desktop: folder picker, slug subfolder, native confirm. Browser: in-app name prompt.
     pub(crate) fn save_as(&mut self) {
-        let Some(parent) =
-            rfd::FileDialog::new().set_title("Choose where to create the preset folder").pick_folder()
-        else {
-            return;
-        };
-        let target = parent.join(slug(&self.state.preset_name));
-        if preset_exists(&target) {
-            let answer = rfd::MessageDialog::new()
-                .set_title("Overwrite preset?")
-                .set_description(format!(
-                    "{} already contains a preset. Overwrite it?",
-                    target.display()
-                ))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show();
-            if answer != rfd::MessageDialogResult::Yes {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some((location, exists)) = platform::choose_save_location(&self.state.preset_name) else {
+                return;
+            };
+            if exists
+                && !platform::confirm(
+                    "Overwrite preset?",
+                    &format!("{} already contains a preset. Overwrite it?", location.describe()),
+                )
+            {
                 return;
             }
+            self.save_to(&location);
         }
-        self.save_to(&target);
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.save_dialog = Some(SaveDialog { name: self.state.preset_name.clone(), confirm_overwrite: false });
+        }
     }
 
-    fn save_to(&mut self, dir: &Path) {
+    /// Browser Save dialog confirmed: store under the chosen name (after an overwrite notice if needed).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn save_dialog_confirmed(&mut self) {
+        let Some(dialog) = self.save_dialog.clone() else { return };
+        let name = dialog.name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let (location, exists) = platform::location_for_name(&name);
+        if exists && !dialog.confirm_overwrite {
+            if let Some(d) = &mut self.save_dialog {
+                d.confirm_overwrite = true;
+            }
+            return;
+        }
+        self.state.preset_name = name;
+        self.save_to(&location);
+        self.save_dialog = None;
+    }
+
+    fn save_to(&mut self, location: &SavedLocation) {
         let preset = state_to_preset(&self.state);
-        match preset.save_dir(dir) {
+        match platform::save_to(&preset, location) {
             Ok(()) => {
-                self.state.source = PresetSource::Disk(dir.to_path_buf());
+                self.state.source = PresetSource::Saved(location.clone());
                 self.state.modified = false;
-                self.state.disk_presets = scan_presets_dir(Path::new(PRESETS_DIR));
+                self.state.saved_presets = platform::list_saved();
             }
             Err(e) => self.report(format!("save failed: {e:#}")),
         }
     }
 
+    pub(crate) fn export(&mut self) {
+        let preset = state_to_preset(&self.state);
+        if let Err(e) = platform::export_bundle(&preset) {
+            self.report(format!("export failed: {e:#}"));
+        }
+    }
+
+    pub(crate) fn import(&mut self) {
+        platform::request_import();
+    }
+
+    fn poll_import(&mut self) {
+        if let Some(result) = platform::poll_import() {
+            match result {
+                Ok(p) => {
+                    self.load_preset(p, PresetSource::Imported);
+                    self.state.modified = true;
+                }
+                Err(e) => self.report(format!("import failed: {e:#}")),
+            }
+        }
+    }
+
     pub(crate) fn rescan_presets(&mut self) {
-        self.state.disk_presets = scan_presets_dir(Path::new(PRESETS_DIR));
+        self.state.saved_presets = platform::list_saved();
     }
 
     /// Shows a non-shader message in the error panel.
@@ -225,6 +288,8 @@ impl eframe::App for App {
             self.state.playing = false;
             self.report(format!("{message}. Restart the application to continue."));
         }
+        self.poll_import();
+        ui_topbar::save_dialog(self, &ctx);
         // Global shortcut: Ctrl/Cmd+Enter applies shaders. Consume it before the editors see it.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)) {
             self.apply_shaders();

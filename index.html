@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cellular Automata Shader IDE</title>
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <style>
+        html, body { margin: 0; height: 100%; background: #0c0c0e; color: #ddd; overflow: hidden;
+                     font: 15px/1.4 system-ui, sans-serif; }
+        canvas { display: block; width: 100%; height: 100%; outline: none; }
+        #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                   text-align: center; padding: 2rem; }
+    </style>
+</head>
+<body>
+    <div id="loading"><p>Loading… (this app needs a browser with WebGPU)</p></div>
+    <canvas id="ca_canvas"></canvas>
+</body>
+</html>

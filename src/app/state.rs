@@ -1,8 +1,9 @@
 //! Pure application state and the shader build flow (no GPU, no UI).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::time::Instant;
+use web_time::Instant;
+
+use crate::platform::SavedLocation;
 
 use crate::preset::{param_value_from_toml, param_value_to_toml, InitPattern, Preset, PresetMeta};
 use crate::shader::assemble::{assemble_render, assemble_rule, Assembled};
@@ -20,7 +21,9 @@ pub const MAX_GRID_SIZE: u32 = 4096;
 pub enum PresetSource {
     Builtin(usize),
     Template(usize),
-    Disk(PathBuf),
+    /// Imported from a bundle file; not stored anywhere yet.
+    Imported,
+    Saved(SavedLocation),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -106,7 +109,7 @@ pub struct AppState {
     pub pending: SimConfig,
     pub preset_name: String,
     pub source: PresetSource,
-    pub disk_presets: Vec<(String, PathBuf)>,
+    pub saved_presets: Vec<(String, SavedLocation)>,
     pub started: Instant,
 }
 
@@ -133,7 +136,7 @@ impl AppState {
             pending,
             preset_name,
             source,
-            disk_presets: Vec::new(),
+            saved_presets: Vec::new(),
             started: Instant::now(),
         }
     }

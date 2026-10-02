@@ -1,10 +1,13 @@
 //! A preset is a folder with `preset.toml`, `rule.wgsl` and `render.wgsl`.
 
 pub mod builtin;
+pub mod bundle;
 
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +49,7 @@ pub struct Preset {
     pub render: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Preset {
     pub fn load_dir(dir: &Path) -> anyhow::Result<Preset> {
         let meta_path = dir.join("preset.toml");
@@ -135,6 +139,7 @@ pub fn slug(name: &str) -> String {
 }
 
 /// True when `dir` already holds a preset.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn preset_exists(dir: &Path) -> bool {
     dir.join("preset.toml").is_file()
 }
@@ -142,6 +147,7 @@ pub fn preset_exists(dir: &Path) -> bool {
 /// Lists `(name, folder)` for every loadable preset folder directly under `dir`, sorted by name.
 /// Folders named after a built-in id are skipped: those are the embedded sources and already
 /// appear in the built-in list.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn scan_presets_dir(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let is_builtin_folder = |e: &std::fs::DirEntry| {
