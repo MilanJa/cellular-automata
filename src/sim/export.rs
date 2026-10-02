@@ -30,7 +30,7 @@ pub fn unpad_rows(padded: &[u8], padded_bpr: usize, bpr: usize, rows: usize) -> 
 /// Converts 8-bit pixels from the surface format to RGBA in place (BGRA surfaces get swizzled).
 pub fn to_rgba(pixels: &mut [u8], format: wgpu::TextureFormat) {
     if matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
     }
