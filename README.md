@@ -52,6 +52,10 @@ Switch **Grid → mode** to *1D (space-time)*. The grid becomes a space-time dia
 writes the next row below the previous one, and once the bottom is reached the diagram scrolls.
 Use `prev_cell(x - 1)`, `prev_cell(x)`, `prev_cell(x + 1)` for an elementary automaton.
 
+Do **not** read the previous generation with `cell(x, i32(pos.y) - 1)` in 1D mode: once the
+diagram scrolls, the row being written stays at the bottom and that expression reads two
+generations back. `prev_cell` always reads the right row.
+
 ## Presets
 
 A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`. Folders under
