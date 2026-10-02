@@ -1,4 +1,5 @@
 pub mod export;
+pub mod history;
 pub mod init;
 pub mod paint;
 pub mod row;

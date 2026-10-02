@@ -63,6 +63,10 @@ pub struct App {
     launched: web_time::Instant,
     /// The last image used as a seed, kept so mode changes can re-apply it.
     pub(crate) seed_image: Option<RgbaImage>,
+    /// Snapshot to restore on the next frame (set by the timeline slider).
+    pending_restore: Option<usize>,
+    /// Timeline slider position while scrubbing; `None` follows the newest snapshot.
+    pub(crate) scrub: Option<usize>,
 }
 
 impl App {
@@ -121,6 +125,8 @@ impl App {
             last_viewport: None,
             launched: web_time::Instant::now(),
             seed_image: None,
+            pending_restore: None,
+            scrub: None,
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
@@ -435,6 +441,14 @@ impl App {
         self.state.stuck_since = None;
     }
 
+    /// Timeline slider moved: pause and restore that snapshot on the next frame.
+    pub(crate) fn scrub_to(&mut self, index: usize) {
+        self.state.playing = false;
+        self.scrub = Some(index);
+        self.pending_restore = Some(index);
+        self.clear_stats();
+    }
+
     /// Starts a PNG export of the current state at `scale` pixels per cell.
     pub(crate) fn export_image(&mut self, scale: u32) {
         let mut sim = self.sim.lock().unwrap();
@@ -586,9 +600,17 @@ impl eframe::App for App {
             self.state.step_once = false;
             let time = self.state.started.elapsed().as_secs_f32();
             let strokes = std::mem::take(&mut self.strokes);
-            let (rect, response) = show_viewport(ui, &self.sim, steps, time, strokes);
+            let restore = self.pending_restore.take();
+            let timeline_height = 26.0;
+            let viewport_size = egui::vec2(ui.available_width(), (ui.available_height() - timeline_height).max(1.0));
+            let (rect, response) = ui
+                .allocate_ui_with_layout(viewport_size, egui::Layout::top_down(egui::Align::Min), |ui| {
+                    show_viewport(ui, &self.sim, steps, time, strokes, restore)
+                })
+                .inner;
             self.last_viewport = Some(rect);
             self.collect_strokes(&response, rect);
+            ui_topbar::timeline(self, ui);
         });
 
         if self.state.playing || self.export_pending() || self.modulation_active() {

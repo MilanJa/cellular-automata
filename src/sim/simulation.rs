@@ -11,6 +11,10 @@ use crate::shader::validate::{validate, ShaderError, ShaderFile};
 use crate::sim::export::{
     clamp_scale, encode_png, padded_bytes_per_row, to_rgba, unpad_rows, ExportedImage,
 };
+use crate::sim::history::{
+    should_snapshot, snapshot_capacity, SnapshotMeta, SnapshotRing, DEFAULT_BUDGET_BYTES,
+    DEFAULT_INTERVAL, MAX_SNAPSHOTS,
+};
 use crate::sim::init::generate_init;
 use crate::sim::paint::{brush_bbox, PaintUniform, Stroke, PAINT_WGSL};
 use crate::sim::stats::{StatsSample, STATS_WGSL};
@@ -102,6 +106,10 @@ pub struct Simulation {
     sampler: wgpu::Sampler,
     /// Viewport-resolution scene and post targets; created on first frame, resized on demand.
     scene: Option<SceneTargets>,
+    /// Rewind snapshots: one grid-sized texture per slot plus the ring that orders them.
+    history_tex: Vec<wgpu::Texture>,
+    history: SnapshotRing,
+    snapshot_interval: u32,
     globals: Globals,
     /// Set by wgpu's device-lost callback; drained by the app once per frame.
     device_lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -418,6 +426,8 @@ impl Simulation {
                 *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
             });
         }
+        let history_capacity = snapshot_capacity(config.width, config.height, DEFAULT_BUDGET_BYTES, MAX_SNAPSHOTS);
+        let history_tex = create_history_textures(&device, config.width, config.height, history_capacity);
         let mut sim = Simulation {
             device,
             queue,
@@ -447,6 +457,9 @@ impl Simulation {
             blit_pipeline,
             sampler,
             scene: None,
+            history_tex,
+            history: SnapshotRing::new(history_capacity),
+            snapshot_interval: DEFAULT_INTERVAL,
             globals,
             device_lost,
             export: None,
@@ -692,6 +705,9 @@ impl Simulation {
         config.width = clamp_size(config.width, &limits);
         config.height = clamp_size(config.height, &limits);
         if config.width != self.config.width || config.height != self.config.height {
+            let cap = snapshot_capacity(config.width, config.height, DEFAULT_BUDGET_BYTES, MAX_SNAPSHOTS);
+            self.history_tex = create_history_textures(&self.device, config.width, config.height, cap);
+            self.history = SnapshotRing::new(cap);
             self.textures = create_textures(
                 &self.device,
                 &self.compute_layout,
@@ -708,6 +724,50 @@ impl Simulation {
         }
         self.config = config;
         self.reset();
+    }
+
+    // ---- rewind ----
+
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    pub fn history_capacity(&self) -> usize {
+        self.history.capacity()
+    }
+
+    pub fn history_meta(&self, index: usize) -> Option<SnapshotMeta> {
+        self.history.get(index).map(|(_, m)| m)
+    }
+
+    pub fn snapshot_interval(&self) -> u32 {
+        self.snapshot_interval
+    }
+
+    pub fn set_snapshot_interval(&mut self, interval: u32) {
+        self.snapshot_interval = interval.max(1);
+    }
+
+    /// Copies the current state into the next history slot.
+    pub fn snapshot_now(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        let meta = SnapshotMeta { step: self.globals.frame, row: self.globals.row };
+        let slot = self.history.push(meta);
+        copy_whole(encoder, &self.textures.tex[self.cur], &self.history_tex[slot], self.config.width, self.config.height);
+    }
+
+    /// Makes snapshot `index` (oldest first) the current state. The step counter and 1D row
+    /// are restored too, so stepping continues from that moment.
+    pub fn restore_snapshot(&mut self, encoder: &mut wgpu::CommandEncoder, index: usize) -> Option<SnapshotMeta> {
+        let (slot, meta) = self.history.get(index)?;
+        for tex in &self.textures.tex {
+            copy_whole(encoder, &self.history_tex[slot], tex, self.config.width, self.config.height);
+        }
+        self.cur = 0;
+        self.globals.frame = meta.step;
+        self.globals.row = meta.row;
+        self.globals.prev_row = meta.row.saturating_sub(1);
+        self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+        Some(meta)
     }
 
     pub fn reset(&mut self) {
@@ -733,6 +793,7 @@ impl Simulation {
                 wgpu::Extent3d { width: c.width, height: c.height, depth_or_array_layers: 1 },
             );
         }
+        self.history.clear();
         self.globals = Globals {
             size: [c.width, c.height],
             frame: 0,
@@ -1054,6 +1115,13 @@ impl Simulation {
             }
             drop(pass);
             cur = dst;
+            // Rewind snapshots: the state just written, every `snapshot_interval` steps.
+            let step_done = snapshots[i].frame.wrapping_add(1);
+            if should_snapshot(step_done, self.snapshot_interval) {
+                let row_after = plans[i].map_or(snapshots[i].row, |p| p.next_row);
+                let slot = self.history.push(SnapshotMeta { step: step_done, row: row_after });
+                copy_whole(encoder, &self.textures.tex[cur], &self.history_tex[slot], w, h);
+            }
         }
         self.cur = cur;
     }
@@ -1144,6 +1212,27 @@ fn mode_code(mode: Mode) -> u32 {
         Mode::TwoD => 0,
         Mode::OneD => 1,
     }
+}
+
+fn copy_whole(encoder: &mut wgpu::CommandEncoder, src: &wgpu::Texture, dst: &wgpu::Texture, width: u32, height: u32) {
+    copy_rows(encoder, src, 0, dst, 0, width, height);
+}
+
+fn create_history_textures(device: &wgpu::Device, width: u32, height: u32, count: usize) -> Vec<wgpu::Texture> {
+    (0..count)
+        .map(|i| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&format!("ca history {i}")),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        })
+        .collect()
 }
 
 fn copy_rows(
@@ -1601,6 +1690,45 @@ mod gpu_tests {
         assert!(step_and_check(&mut sim, 1).is_none());
         let live = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
         assert_eq!(live, 0, "blend 0 selects rule A (Life kills a full grid)");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn snapshots_can_be_restored() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
+        let Some(mut sim) = sim_with(SimConfig {
+            mode: Mode::TwoD,
+            width: 16,
+            height: 16,
+            init: InitPattern::Blank,
+            seed: 1,
+        }) else {
+            return;
+        };
+        sim.set_pipelines(&rule, &render, &post).unwrap();
+        upload_default_params(&mut sim, &p.rule, &p.render);
+        sim.set_snapshot_interval(1);
+        // Paint a lone dot (dies in one Life step) and snapshot that state.
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        sim.paint(&mut enc, &[Stroke { x: 8, y: 8, radius: 0.5, value: [1.0, 0.0, 0.0, 1.0] }]);
+        sim.snapshot_now(&mut enc);
+        sim.queue.submit([enc.finish()]);
+        let painted = read_back(&sim, sim.cur);
+        assert!(painted.iter().step_by(4).any(|&r| r > 0.5));
+        assert!(step_and_check(&mut sim, 3).is_none());
+        assert_eq!(sim.history_len(), 4, "one manual plus one per step");
+        assert_eq!(sim.frame(), 3);
+        assert!(read_back(&sim, sim.cur).iter().step_by(4).all(|&r| r == 0.0), "the dot died");
+        // Restore the first snapshot: the dot is back and the step counter rewinds.
+        let mut enc = sim.device.create_command_encoder(&Default::default());
+        let meta = sim.restore_snapshot(&mut enc, 0).unwrap();
+        sim.queue.submit([enc.finish()]);
+        assert_eq!(meta.step, 0);
+        assert_eq!(sim.frame(), 0);
+        assert_eq!(read_back(&sim, 0), painted);
+        assert_eq!(read_back(&sim, 1), painted, "both ping-pong textures are restored");
     }
 
     #[test]

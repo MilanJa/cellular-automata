@@ -133,6 +133,13 @@ to it. By default the wave runs on the wall clock so a paused simulation still a
 *follow simulation* to make it pause with the simulation instead. Modulations are saved with
 the preset (`[modulation.<name>]` in `preset.toml`). Neon Life ships with a breathing `glow`.
 
+## Rewind
+
+The strip under the viewport is a timeline of snapshots, taken every *n* steps (choose *n* in
+the dropdown; default 5) into a ring that uses about 256 MB of GPU memory, so small grids keep
+hundreds of snapshots and large ones a few dozen. Drag the slider to pause and jump to any
+snapshot; press Play to continue from there. Reset clears the history.
+
 ## Seeding from an image
 
 **Image → Seed grid from image…** (or drop a PNG onto the window) resamples the picture onto the

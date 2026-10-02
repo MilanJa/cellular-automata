@@ -216,3 +216,48 @@ pub fn stats_readout(app: &App, ui: &mut egui::Ui) {
         ui.colored_label(egui::Color32::from_rgb(230, 170, 90), text);
     }
 }
+
+/// Rewind strip under the viewport: snapshot slider, step label and snapshot interval.
+pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
+    let (len, cap, interval, selected_meta) = {
+        let sim = app.sim.lock().unwrap();
+        let len = sim.history_len();
+        let idx = app.scrub.unwrap_or(len.saturating_sub(1)).min(len.saturating_sub(1));
+        (len, sim.history_capacity(), sim.snapshot_interval(), sim.history_meta(idx))
+    };
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("⏪").weak());
+        if len < 2 {
+            ui.label(egui::RichText::new("history fills as the simulation runs").weak());
+        } else {
+            // While playing the slider follows the newest snapshot; dragging it pauses and rewinds.
+            let newest = len - 1;
+            let mut pos = if app.state.playing { newest } else { app.scrub.unwrap_or(newest).min(newest) };
+            let slider = egui::Slider::new(&mut pos, 0..=newest).show_value(false);
+            let resp = ui.add_sized([ui.available_width() - 330.0, 18.0], slider);
+            if resp.changed() {
+                app.scrub_to(pos);
+            }
+            if let Some(m) = selected_meta {
+                ui.label(format!("step {}", m.step));
+            }
+            ui.label(egui::RichText::new(format!("{len}/{cap} snapshots")).weak());
+        }
+        ui.label(egui::RichText::new("every").weak());
+        let mut iv = interval;
+        egui::ComboBox::from_id_salt("snapshot-interval")
+            .selected_text(format!("{iv} steps"))
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for v in [1u32, 2, 5, 10, 30, 100] {
+                    ui.selectable_value(&mut iv, v, format!("{v} steps"));
+                }
+            });
+        if iv != interval {
+            app.sim.lock().unwrap().set_snapshot_interval(iv);
+        }
+    });
+    if app.state.playing {
+        app.scrub = None;
+    }
+}

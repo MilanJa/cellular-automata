@@ -31,6 +31,8 @@ pub struct ViewportCallback {
     pub strokes: Vec<Stroke>,
     /// Size in physical pixels of the letterboxed grid area (the scene resolution).
     pub scene_pixels: (u32, u32),
+    /// Rewind request: restore this snapshot (oldest first) before anything else this frame.
+    pub restore: Option<usize>,
 }
 
 impl CallbackTrait for ViewportCallback {
@@ -44,6 +46,9 @@ impl CallbackTrait for ViewportCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         let mut sim = self.sim.lock().unwrap();
         sim.set_time(self.time);
+        if let Some(index) = self.restore {
+            sim.restore_snapshot(egui_encoder, index);
+        }
         if !self.strokes.is_empty() {
             sim.paint(egui_encoder, &self.strokes);
         }
@@ -81,6 +86,7 @@ pub fn show_viewport(
     steps: u32,
     time: f32,
     strokes: Vec<Stroke>,
+    restore: Option<usize>,
 ) -> (egui::Rect, egui::Response) {
     let size = ui.available_size();
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
@@ -93,7 +99,7 @@ pub fn show_viewport(
     let ppp = ui.ctx().pixels_per_point();
     let (_, _, lw, lh) = letterbox(rect.width() * ppp, rect.height() * ppp, grid_aspect);
     let scene_pixels = ((lw.round() as u32).max(1), (lh.round() as u32).max(1));
-    let cb = ViewportCallback { sim: sim.clone(), steps, time, grid_aspect, strokes, scene_pixels };
+    let cb = ViewportCallback { sim: sim.clone(), steps, time, grid_aspect, strokes, scene_pixels, restore };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, cb));
     (rect, response)
 }
