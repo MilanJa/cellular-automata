@@ -28,7 +28,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         } else {
             ("no pipeline yet", theme::WARN)
         };
-        ui.horizontal(|ui| {
+        // Wrapped, so the statistics drop to a second line on a narrow screen.
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(msg).color(color));
             super::ui_topbar::stats_readout(app, ui);
         });

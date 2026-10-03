@@ -1,23 +1,30 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     env_logger::init();
-    // Optional: `--preset <builtin-id | folder>` selects the preset loaded at startup.
+    // Optional: `--preset <builtin-id | folder>` selects the preset loaded at startup, and
+    // `--size WxH` the initial window size (handy for checking the compact layout).
     let mut args = std::env::args().skip(1);
     let mut start_preset: Option<String> = None;
+    let mut size = [1400.0, 900.0];
     while let Some(a) = args.next() {
         match a.as_str() {
             "--preset" | "-p" => start_preset = args.next(),
+            "--size" => {
+                if let Some((w, h)) = args.next().as_deref().and_then(|s| s.split_once('x'))
+                    && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
+                {
+                    size = [w.max(200.0), h.max(200.0)];
+                }
+            }
             "--help" | "-h" => {
-                println!("usage: cellular-automata [--preset <builtin-id | folder>]");
+                println!("usage: cellular-automata [--preset <builtin-id | folder>] [--size WxH]");
                 return Ok(());
             }
             _ => {}
         }
     }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Cellular Automata Shader IDE")
-            .with_inner_size([1400.0, 900.0]),
+        viewport: egui::ViewportBuilder::default().with_title("Cellular Automata Shader IDE").with_inner_size(size),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };

@@ -10,19 +10,47 @@ pub const SAVE_SHORTCUT: egui::KeyboardShortcut = egui::KeyboardShortcut::new(eg
 
 /// Menu bar: File / Image / View menus, the preset picker, transport controls with the grid
 /// settings, the microphone and MIDI toggles, and the status readout pinned to the right.
-pub fn show(app: &mut App, ui: &mut egui::Ui) {
+/// `compact` (narrow screens) splits it over two rows, shortens the labels, drops the rate
+/// readout and adds the toggle for the editors panel.
+pub fn show(app: &mut App, ui: &mut egui::Ui, compact: bool) {
+    if compact {
+        egui::containers::menu::MenuBar::new().ui(ui, |ui| {
+            file_menu(app, ui);
+            image_menu(app, ui);
+            view_menu(app, ui);
+            let code = egui::RichText::new("</> Code");
+            let code = if app.code_panel_open { code.color(theme::ACCENT).strong() } else { code };
+            if ui
+                .selectable_label(app.code_panel_open, code)
+                .on_hover_text("Show or hide the shader editors and sliders")
+                .clicked()
+            {
+                app.code_panel_open = !app.code_panel_open;
+            }
+            ui.separator();
+            preset_picker(app, ui, 130.0);
+        });
+        ui.horizontal_wrapped(|ui| {
+            transport(app, ui, true);
+            ui.separator();
+            super::ui_inputs::audio(app, ui);
+            super::ui_inputs::midi(app, ui);
+            status(app, ui, true);
+        });
+        return;
+    }
     egui::containers::menu::MenuBar::new().ui(ui, |ui| {
         file_menu(app, ui);
         image_menu(app, ui);
         view_menu(app, ui);
         ui.separator();
-        preset_picker(app, ui);
+        preset_picker(app, ui, 240.0);
         ui.separator();
-        transport(app, ui);
+        transport(app, ui, false);
         ui.separator();
         super::ui_inputs::audio(app, ui);
         super::ui_inputs::midi(app, ui);
-        status(app, ui);
+        status(app, ui, false);
     });
 }
 
@@ -119,11 +147,11 @@ fn view_menu(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn preset_picker(app: &mut App, ui: &mut egui::Ui) {
+fn preset_picker(app: &mut App, ui: &mut egui::Ui, width: f32) {
     let label = if app.state.modified { format!("{} *", app.state.preset_name) } else { app.state.preset_name.clone() };
     let mut to_load: Option<(Preset, PresetSource)> = None;
     let mut to_load_saved: Option<platform::SavedLocation> = None;
-    egui::ComboBox::from_id_salt("preset").selected_text(label).width(240.0).show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt("preset").selected_text(label).width(width).show_ui(ui, |ui| {
         ui.label(egui::RichText::new("Built-in").small().weak());
         for (i, b) in BUILTINS.iter().enumerate() {
             let selected = app.state.source == PresetSource::Builtin(i);
@@ -150,37 +178,47 @@ fn preset_picker(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn transport(app: &mut App, ui: &mut egui::Ui) {
+fn transport(app: &mut App, ui: &mut egui::Ui, compact: bool) {
+    let (pause, play, step, reset) =
+        if compact { ("⏸", "▶", "⏭", "↺") } else { ("⏸ Pause", "▶ Play", "⏭ Step", "↺ Reset") };
     let play = if app.state.playing {
-        egui::Button::new("⏸ Pause")
+        egui::Button::new(pause)
     } else {
-        egui::Button::new(egui::RichText::new("▶ Play").color(theme::ACCENT).strong())
+        egui::Button::new(egui::RichText::new(play).color(theme::ACCENT).strong())
     };
-    if ui.add(play).on_hover_text("Space").clicked() {
+    if ui.add(play).on_hover_text("Play / pause (Space)").clicked() {
         app.state.playing = !app.state.playing;
     }
-    if ui.add_enabled(!app.state.playing, egui::Button::new("⏭ Step")).clicked() {
+    if ui.add_enabled(!app.state.playing, egui::Button::new(step)).on_hover_text("One step").clicked() {
         app.state.step_once = true;
     }
-    ui.label("steps/frame");
-    if ui.add(egui::DragValue::new(&mut app.state.steps_per_frame).range(1..=256)).changed() {
+    if !compact {
+        ui.label("steps/frame");
+    }
+    if ui
+        .add(egui::DragValue::new(&mut app.state.steps_per_frame).range(1..=256))
+        .on_hover_text("Simulation steps per rendered frame")
+        .changed()
+    {
         app.state.modified = true;
     }
-    if ui.button("↺ Reset").on_hover_text("Apply grid settings and re-initialise").clicked() {
+    if ui.button(reset).on_hover_text("Apply grid settings and re-initialise").clicked() {
         app.apply_settings_and_reset();
     }
     super::ui_inputs::grid(app, ui);
 }
 
-fn status(app: &mut App, ui: &mut egui::Ui) {
+fn status(app: &mut App, ui: &mut egui::Ui, compact: bool) {
     let frame = lock(&app.sim).frame();
     let steps_per_sec = app.rate.update(web_time::Instant::now(), frame);
     let dt = ui.input(|i| i.stable_dt).max(1e-6);
     // Status lives at the right edge, so the controls keep a stable position.
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(
-            egui::RichText::new(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt)).weak(),
-        );
+        if !compact {
+            ui.label(
+                egui::RichText::new(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt)).weak(),
+            );
+        }
         if let Some((done, total)) = app.recording_progress() {
             if ui.small_button("Stop").clicked() {
                 app.stop_recording();
@@ -287,6 +325,8 @@ pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
         let idx = app.scrub.unwrap_or(len.saturating_sub(1)).min(len.saturating_sub(1));
         (len, sim.history_capacity(), sim.snapshot_interval(), sim.history_meta(idx))
     };
+    // On a narrow strip the snapshot count and the "every" label go, so the slider keeps room.
+    let compact = ui.available_width() < 560.0;
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("⏪").weak());
         if len < 2 {
@@ -297,16 +337,21 @@ pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
             let mut pos = if app.state.playing { newest } else { app.scrub.unwrap_or(newest).min(newest) };
             let slider = egui::Slider::new(&mut pos, 0..=newest).show_value(false);
             // Leave room for the labels on the right; never collapse below a usable width.
-            let resp = ui.add_sized([(ui.available_width() - 330.0).max(80.0), 18.0], slider);
+            let reserved = if compact { 200.0 } else { 330.0 };
+            let resp = ui.add_sized([(ui.available_width() - reserved).max(80.0), 18.0], slider);
             if resp.changed() {
                 app.scrub_to(pos);
             }
             if let Some(m) = selected_meta {
                 ui.label(format!("step {}", m.step));
             }
-            ui.label(egui::RichText::new(format!("{len}/{cap} snapshots")).weak());
+            if !compact {
+                ui.label(egui::RichText::new(format!("{len}/{cap} snapshots")).weak());
+            }
         }
-        ui.label(egui::RichText::new("every").weak());
+        if !compact {
+            ui.label(egui::RichText::new("every").weak());
+        }
         let mut iv = interval;
         egui::ComboBox::from_id_salt("snapshot-interval").selected_text(format!("{iv} steps")).width(90.0).show_ui(
             ui,

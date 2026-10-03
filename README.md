@@ -15,6 +15,7 @@ automata, with a runnable preset per chapter under **File → New from template 
     cargo run --release
     cargo run --release -- --preset rule30        # start on a built-in (rule30, rule110, life, gray_scott)
     cargo run --release -- --preset presets/life  # or on a preset folder
+    cargo run --release -- --size 400x800         # a phone-sized window (the compact layout)
 
 ## Writing a rule
 
@@ -263,6 +264,11 @@ browser downloads `<preset>-step<N>.png`.
 The same app runs in the browser with WebGPU (recent Chrome or Edge, Firefox 141+, Safari 26+).
 Every push to `main` publishes it to https://milanja.github.io/cellular-automata/ .
 Add `?preset=rule30` to the URL to start on a built-in.
+
+On a narrow screen (a phone held upright, or any window under about 720 points wide) the
+layout switches to a compact form: the top bar takes two rows, the grid fills the width, and
+the editors and sliders live in a bottom panel behind the **</> Code** toggle. Painting works
+with a finger.
 
 Differences from the desktop build: presets are saved in the browser's local storage
 (the "Browser storage" section of the dropdown) instead of folders, and **File → Export bundle…** / **Import bundle…**

@@ -138,7 +138,13 @@ pub struct App {
     /// modulated. Computed once per frame and shown next to the sliders.
     pub(crate) live_values: Option<BTreeMap<String, ParamValue>>,
     drafts: Drafts,
+    /// Compact layout only: whether the editors and sliders panel is shown (it covers much of
+    /// a phone screen, so it starts hidden and the grid shows first).
+    pub(crate) code_panel_open: bool,
 }
+
+/// Below this content width (points) the layout switches to the compact, phone-friendly form.
+const COMPACT_WIDTH: f32 = 720.0;
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -213,6 +219,7 @@ impl App {
             notice: None,
             live_values: None,
             drafts: Drafts { last_text: None, last_check: now },
+            code_panel_open: false,
         };
         app.state.saved_presets = platform::list_saved();
         app.state.modulations = preset.meta.modulation.clone();
@@ -1018,6 +1025,15 @@ impl App {
         }
     }
 
+    /// The editors and the sliders: a left panel on wide screens, a toggled bottom panel on
+    /// narrow ones.
+    fn side_panel_contents(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui_editor::show(self, ui);
+            ui_params::show(self, ui);
+        });
+    }
+
     /// True while a text editor has keyboard focus (so Space types rather than toggles play).
     fn typing(ctx: &egui::Context) -> bool {
         ctx.memory(|m| m.focused()).is_some_and(|id| egui::widgets::text_edit::TextEditState::load(ctx, id).is_some())
@@ -1057,18 +1073,26 @@ impl eframe::App for App {
         }
 
         let chrome = theme::chrome_frame(ui.style());
-        egui::Panel::top("topbar").frame(chrome).show(ui, |ui| ui_topbar::show(self, ui));
+        // Narrow screens (a phone held upright) get a compact layout: the top bar on two rows
+        // and the editors in a bottom panel behind a toggle, so the grid is what shows first.
+        let compact = ctx.content_rect().width() < COMPACT_WIDTH;
+        egui::Panel::top("topbar").frame(chrome).show(ui, |ui| ui_topbar::show(self, ui, compact));
         egui::Panel::bottom("errors")
             .resizable(true)
-            .default_size(80.0)
+            .default_size(if compact { 44.0 } else { 80.0 })
             .frame(chrome)
             .show(ui, |ui| ui_errors::show(self, ui));
-        egui::Panel::left("side").resizable(true).default_size(520.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui_editor::show(self, ui);
-                ui_params::show(self, ui);
-            });
-        });
+        if compact {
+            if self.code_panel_open {
+                let height = ctx.content_rect().height() * 0.55;
+                egui::Panel::bottom("side-compact")
+                    .resizable(true)
+                    .default_size(height)
+                    .show(ui, |ui| self.side_panel_contents(ui));
+            }
+        } else {
+            egui::Panel::left("side").resizable(true).default_size(520.0).show(ui, |ui| self.side_panel_contents(ui));
+        }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             // While a recording waits for a frame to come back, the simulation holds still, so
             // consecutive frames are always exactly `steps_per_frame` steps apart.
