@@ -11,6 +11,8 @@ pub struct Builtin {
     pub render: &'static str,
     pub post: Option<&'static str>,
     pub seed: Option<&'static str>,
+    /// A second automaton that runs alongside as layer B (the preset folder's `layer_b/`).
+    pub layer_b: Option<&'static Builtin>,
     /// Display name, parsed from `meta_toml` on first use so menus do not re-parse TOML per frame.
     name: OnceLock<String>,
 }
@@ -22,9 +24,12 @@ impl Builtin {
 }
 
 /// `embedded!(id, dir)` embeds the three required files; add `post` and/or `seed` for the
-/// optional `post.wgsl` and `seed.wgsl`.
+/// optional `post.wgsl` and `seed.wgsl`, and `; layer_b = Some(&OTHER)` for a nested layer B.
 macro_rules! embedded {
     ($id:literal, $dir:literal $(, $extra:ident)*) => {
+        embedded!($id, $dir $(, $extra)*; layer_b = None)
+    };
+    ($id:literal, $dir:literal $(, $extra:ident)*; layer_b = $layer_b:expr) => {
         Builtin {
             id: $id,
             meta_toml: include_str!(concat!("../../presets/", $dir, "/preset.toml")),
@@ -32,6 +37,7 @@ macro_rules! embedded {
             render: include_str!(concat!("../../presets/", $dir, "/render.wgsl")),
             post: embedded!(@post $dir $(, $extra)*),
             seed: embedded!(@seed $dir $(, $extra)*),
+            layer_b: $layer_b,
             name: OnceLock::new(),
         }
     };
@@ -50,7 +56,7 @@ macro_rules! embedded {
 /// Ready-to-run examples, listed first in the preset dropdown. A `static` (not a `const`) so
 /// the cached names live in one place. New entries go at the end: tests and the default preset
 /// refer to the earlier ones by index.
-pub static BUILTINS: [Builtin; 11] = [
+pub static BUILTINS: [Builtin; 12] = [
     embedded!("rule30", "rule30"),
     embedded!("rule110", "rule110"),
     embedded!("life", "life"),
@@ -62,7 +68,11 @@ pub static BUILTINS: [Builtin; 11] = [
     embedded!("acorn", "acorn", seed),
     embedded!("gray_scott_discs", "gray_scott_discs", seed),
     embedded!("restless_life", "restless_life"),
+    embedded!("slither", "slither", seed; layer_b = Some(&SLITHER_SCENT)),
 ];
+
+/// Slither's layer B: the scent field its snakes hunt by.
+static SLITHER_SCENT: Builtin = embedded!("slither_scent", "slither/layer_b");
 
 /// Commented starting points for new work, offered by the "New" menu.
 pub static TEMPLATES: [Builtin; 9] = [
@@ -99,7 +109,7 @@ pub fn load_builtin(b: &Builtin) -> Preset {
         post: b.post.map(str::to_string),
         rule_b: None,
         seed: b.seed.map(str::to_string),
-        layer_b: None,
+        layer_b: b.layer_b.map(|lb| Box::new(load_builtin(lb))),
     }
 }
 
@@ -154,16 +164,20 @@ mod tests {
                 b.id
             );
             assert!(preset.meta.width > 0 && preset.meta.height > 0);
+            if let Some(layer_b) = b.layer_b {
+                check_all(std::slice::from_ref(layer_b), &format!("{what} {} layer B", b.id));
+                assert!(layer_b.layer_b.is_none(), "{what} {}: a layer B nests only one level", b.id);
+            }
         }
     }
 
     #[test]
     fn builtins_have_unique_ids() {
-        assert_eq!(BUILTINS.len(), 11);
+        assert_eq!(BUILTINS.len(), 12);
         let mut ids: Vec<_> = BUILTINS.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 11);
+        assert_eq!(ids.len(), 12);
     }
 
     #[test]

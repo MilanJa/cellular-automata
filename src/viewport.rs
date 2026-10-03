@@ -64,15 +64,23 @@ impl CallbackTrait for ViewportCallback {
         if !self.strokes.is_empty() {
             sim.paint(egui_encoder, &self.strokes);
         }
-        if let Some(b) = &self.layer_b {
-            // Both layers see each other's state from before this frame's steps.
-            let mut b = lock(b);
-            sim.mirror_into(egui_encoder, &b.mirror_a);
-            b.sim.mirror_into(egui_encoder, &b.mirror_b);
-            b.sim.set_time(self.time);
-            b.sim.step(egui_encoder, self.steps);
+        match &self.layer_b {
+            Some(b) => {
+                // The layers are stepped in lockstep: before every step each gets a copy of the
+                // other's state, so `other()` always reads the previous generation, however
+                // many steps a frame runs. (A single zero-step pass still refreshes the mirrors
+                // and the globals.)
+                let mut b = lock(b);
+                b.sim.set_time(self.time);
+                for _ in 0..self.steps.max(1) {
+                    sim.mirror_into(egui_encoder, &b.mirror_a);
+                    b.sim.mirror_into(egui_encoder, &b.mirror_b);
+                    b.sim.step(egui_encoder, self.steps.min(1));
+                    sim.step(egui_encoder, self.steps.min(1));
+                }
+            }
+            None => sim.step(egui_encoder, self.steps),
         }
-        sim.step(egui_encoder, self.steps);
         if self.steps > 0 || !self.strokes.is_empty() {
             sim.collect_stats(egui_encoder);
         }

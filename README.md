@@ -176,8 +176,11 @@ file after **Reset**. Built-ins: Rule 30, Rule 110, Game of
 Life, Life-like (B/S), Gray-Scott reaction-diffusion, Neon Life, whose rule is plain Life but
 whose render shader draws glowing beads, age colours, halos and fading trails (a good example of
 how much the render side alone can do), Hex Life, the three code-seeded ones: Glider Gun,
-Acorn and Gray-Scott Discs, and Restless Life, which is Life with a built-in dislike of standing
-still: cells that have not changed for a while flip, so it never settles into still lifes.
+Acorn and Gray-Scott Discs, Restless Life, which is Life with a built-in dislike of standing
+still (cells that have not changed for a while flip, so it never settles into still lifes), and
+Slither, a two-layer automaton of snakes that hunt each other: layer A is the snakes as linked
+chains of cells, layer B the scent they steer by, and a longer snake eats a shorter one it
+runs into.
 
 ## Sharing a scene
 

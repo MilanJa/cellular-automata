@@ -1540,6 +1540,7 @@ mod gpu_tests {
         assert!(step_and_check(&mut sim, 200).is_none());
         assert!(population(&sim) > 50, "a methuselah should be well under way after 200 steps");
     }
+
     #[test]
     #[ignore = "needs a GPU"]
     fn restless_life_keeps_changing_long_after_plain_life_would_have_settled() {
@@ -1836,6 +1837,99 @@ mod gpu_tests {
         a.set_other(None);
         assert!(step_and_check(&mut a, 1).is_none(), "without a layer B, other() reads zeros");
         assert!(read_back(&a, a.cur).iter().step_by(4).all(|&r| r == 0.0), "the has_other flag gates other()");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn slither_snakes_survive_and_keep_moving_with_their_scent_layer() {
+        let _gpu = gpu_lock();
+        let Some(ctx) = context() else { return };
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "slither").unwrap());
+        let scent = p.layer_b.clone().expect("slither carries its scent layer");
+        let build = |preset: &crate::preset::Preset| {
+            let (editor, config, _, toml_params) = crate::app::state::preset_to_state(preset);
+            let built = crate::app::state::build_shaders(&editor).unwrap();
+            let mut values = crate::app::state::resolve_values(&built.specs, &toml_params, &Default::default());
+            // No new snakes or food during the test, so the snake mass can only be moved by
+            // eating, or gained from the food the seed scattered.
+            values.insert("spawn".into(), crate::shader::params::ParamValue::F32(0.0));
+            values.insert("food".into(), crate::shader::params::ParamValue::F32(0.0));
+            let mut sim = Simulation::new(
+                ctx.clone(),
+                SimConfig { mode: Mode::TwoD, width: 256, height: 256, init: config.init, seed: config.seed },
+            );
+            sim.disable_history();
+            sim.set_pipelines(&built.rule, &built.render, &built.post, built.seed.as_ref()).unwrap();
+            sim.set_params(pack_params(&built.specs, &values));
+            sim
+        };
+        let mut a = build(&p);
+        let mut b = build(&scent);
+        let mirror_a = a.create_mirror_texture();
+        let mirror_b = b.create_mirror_texture();
+        a.set_other(Some(&mirror_b));
+        b.set_other(Some(&mirror_a));
+        // `.r` packs kind * 8 + direction + 32 * id (see presets/slither/rule.wgsl).
+        let kind = |c: &[f32]| ((c[0].round() as i32) % 32) / 8;
+        let snake_cells = |sim: &Simulation| {
+            let data = read_back(sim, sim.cur);
+            let heads = data.chunks(4).filter(|c| kind(c) == 2).count();
+            let bodies = data.chunks(4).filter(|c| kind(c) == 1).count();
+            (heads, bodies)
+        };
+        let food_cells = |sim: &Simulation| read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 3).count();
+        let longest = |sim: &Simulation| {
+            read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 2).map(|c| c[3]).fold(0.0, f32::max)
+        };
+        // Lockstep, as the viewport does it.
+        let run = |a: &mut Simulation, b: &mut Simulation, steps: u32| {
+            let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut enc = ctx.device.create_command_encoder(&Default::default());
+            for _ in 0..steps {
+                a.mirror_into(&mut enc, &mirror_a);
+                b.mirror_into(&mut enc, &mirror_b);
+                b.step(&mut enc, 1);
+                a.step(&mut enc, 1);
+            }
+            ctx.queue.submit([enc.finish()]);
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            pollster::block_on(scope.pop())
+        };
+        assert!(run(&mut a, &mut b, 1).is_none());
+        let (heads0, bodies0) = snake_cells(&a);
+        let food0 = food_cells(&a);
+        assert!(heads0 >= 2, "the seed should scatter several starter heads, got {heads0}");
+        assert!(food0 > heads0, "the seed should scatter food, got {food0} morsels");
+        assert!(
+            bodies0 <= heads0,
+            "after one move each snake has at most one body cell: {heads0} heads, {bodies0} bodies"
+        );
+        for round in 1..=10 {
+            assert!(run(&mut a, &mut b, 300).is_none(), "validation error while slithering");
+            let (heads, bodies) = snake_cells(&a);
+            let food = food_cells(&a);
+            println!(
+                "step {}: {heads} heads, {bodies} body cells, {food} food, longest snake {:.0}",
+                round * 300,
+                longest(&a)
+            );
+            assert!(heads >= 1, "every snake died");
+            // A starter owes at most 1 + 2 * spawn_length (6) cells of growth, so no snake can
+            // exceed fifteen cells without eating; eating another snake only moves cells between
+            // snakes, and eating food turns one morsel into one cell of snake.
+            assert!(
+                heads + bodies + food <= heads0 * 15 + food0,
+                "mass was created out of nothing: {heads0} starters and {food0} food, now {} snake cells and {food} food",
+                heads + bodies
+            );
+        }
+        let (heads, bodies) = snake_cells(&a);
+        assert!(bodies > heads, "snakes should have grown bodies: {heads} heads, {bodies} body cells");
+        let before = read_back(&a, a.cur);
+        assert!(run(&mut a, &mut b, 3).is_none());
+        assert_ne!(before, read_back(&a, a.cur), "the snakes stopped moving");
+        let scent: f32 = read_back(&b, b.cur).chunks(4).map(|c| c[0]).sum();
+        assert!(scent > 0.0, "the scent layer never picked up the snakes");
     }
 
     #[test]

@@ -59,7 +59,11 @@ layers' shaders can read the other layer's previous state with `other(x, y)` and
 `other_alive(x, y)`, so one automaton can gate, seed or colour another. The *Driven by layer
 B* template is Life that can only be born where layer B's `.g` is high; load Gray-Scott as
 layer B (Params panel, Layer B section) and Life grows only inside the reaction-diffusion
-pattern. A layer B is saved as part of the preset and travels in share links.
+pattern. A layer B is saved as part of the preset and travels in share links. The *Slither*
+built-in pushes this further: layer A is snakes as linked chains of cells that move, eat and
+die, layer B is the scent they emit and steer by, and each layer reads the other every step.
+Its rule is a worked example of agents in a synchronous grid, where a head and the cell it moves
+into must reach the same decision from the same previous state.
 
 ## Animating parameters
 
