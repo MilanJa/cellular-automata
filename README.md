@@ -175,8 +175,9 @@ grid settings that are actually applied, so edits in the **Grid** popover (next 
 file after **Reset**. Built-ins: Rule 30, Rule 110, Game of
 Life, Life-like (B/S), Gray-Scott reaction-diffusion, Neon Life, whose rule is plain Life but
 whose render shader draws glowing beads, age colours, halos and fading trails (a good example of
-how much the render side alone can do), Hex Life, and the three code-seeded ones: Glider Gun,
-Acorn and Gray-Scott Discs.
+how much the render side alone can do), Hex Life, the three code-seeded ones: Glider Gun,
+Acorn and Gray-Scott Discs, and Restless Life, which is Life with a built-in dislike of standing
+still: cells that have not changed for a while flip, so it never settles into still lifes.
 
 ## Sharing a scene
 

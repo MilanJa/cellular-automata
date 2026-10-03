@@ -1540,6 +1540,25 @@ mod gpu_tests {
         assert!(step_and_check(&mut sim, 200).is_none());
         assert!(population(&sim) > 50, "a methuselah should be well under way after 200 steps");
     }
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn restless_life_keeps_changing_long_after_plain_life_would_have_settled() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "restless_life").unwrap());
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
+        let cfg = SimConfig { mode: Mode::TwoD, width: 128, height: 128, init: p.meta.init.clone(), seed: 11 };
+        let Some(mut sim) = sim_with(cfg) else { return };
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
+        upload_default_params(&mut sim, &p.rule, &p.render);
+        assert!(step_and_check(&mut sim, 3000).is_none());
+        let before = live_cells(&read_back(&sim, sim.cur));
+        assert!(before.len() > 100, "population collapsed: {}", before.len());
+        assert!(step_and_check(&mut sim, 1).is_none());
+        let after = live_cells(&read_back(&sim, sim.cur));
+        let changed =
+            before.iter().filter(|c| !after.contains(c)).count() + after.iter().filter(|c| !before.contains(c)).count();
+        assert!(changed > 20, "the grid has gone still: only {changed} cells changed in one step");
+    }
 
     #[test]
     #[ignore = "needs a GPU"]

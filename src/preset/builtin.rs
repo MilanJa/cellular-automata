@@ -50,7 +50,7 @@ macro_rules! embedded {
 /// Ready-to-run examples, listed first in the preset dropdown. A `static` (not a `const`) so
 /// the cached names live in one place. New entries go at the end: tests and the default preset
 /// refer to the earlier ones by index.
-pub static BUILTINS: [Builtin; 10] = [
+pub static BUILTINS: [Builtin; 11] = [
     embedded!("rule30", "rule30"),
     embedded!("rule110", "rule110"),
     embedded!("life", "life"),
@@ -61,6 +61,7 @@ pub static BUILTINS: [Builtin; 10] = [
     embedded!("glider_gun", "glider_gun", seed),
     embedded!("acorn", "acorn", seed),
     embedded!("gray_scott_discs", "gray_scott_discs", seed),
+    embedded!("restless_life", "restless_life"),
 ];
 
 /// Commented starting points for new work, offered by the "New" menu.
@@ -158,11 +159,11 @@ mod tests {
 
     #[test]
     fn builtins_have_unique_ids() {
-        assert_eq!(BUILTINS.len(), 10);
+        assert_eq!(BUILTINS.len(), 11);
         let mut ids: Vec<_> = BUILTINS.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 10);
+        assert_eq!(ids.len(), 11);
     }
 
     #[test]
