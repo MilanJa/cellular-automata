@@ -185,6 +185,69 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Extra helpers for the seed shader, appended to the rule prelude: shapes relative to the
+/// grid's middle and a bit-row decoder for small hand-drawn patterns.
+const SEED_HELPERS: &str = r#"
+// ---- seed helpers ----
+// The cell's position relative to the middle of the grid ((0, 0) is the centre cell).
+fn centred(pos: vec2<u32>) -> vec2<i32> {
+    return vec2<i32>(pos) - vec2<i32>(globals.size) / 2;
+}
+
+// True inside the box whose top-left corner is `origin` and whose size is `size` cells.
+fn in_box(p: vec2<i32>, origin: vec2<i32>, size: vec2<i32>) -> bool {
+    let q = p - origin;
+    return q.x >= 0 && q.y >= 0 && q.x < size.x && q.y < size.y;
+}
+
+// True within `radius` cells of `centre`.
+fn in_disc(p: vec2<i32>, centre: vec2<i32>, radius: f32) -> bool {
+    let d = vec2<f32>(p - centre);
+    return dot(d, d) <= radius * radius;
+}
+
+// Column `x` of a pattern row written as bits, most significant bit first: for a row that is
+// `width` cells wide, `row_bit(0x5u, 1, 3)` reads the middle bit of `101`. False outside 0..width.
+fn row_bit(row: u32, x: i32, width: i32) -> bool {
+    if (x < 0 || x >= width) { return false; }
+    return ((row >> u32(width - 1 - x)) & 1u) == 1u;
+}
+
+// True for a fraction `probability` of the cells, decided by the grid's seed value.
+fn chance(pos: vec2<u32>, probability: f32) -> bool {
+    return rand(pos, 0u) < probability;
+}
+
+// ---- user seed ----
+"#;
+
+const SEED_EPILOGUE: &str = r#"
+// ---- entry ----
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let pos = gid.xy;
+    if (globals.mode == 1u && pos.y != 0u) { return; }
+    if (pos.x >= globals.size.x || pos.y >= globals.size.y) { return; }
+    textureStore(dst, pos, seed(pos));
+}
+"#;
+
+/// The seed shader offered when a preset switches its init to `code`: a disc of random cells.
+pub const DEFAULT_SEED: &str = "// Seed: the starting state of every cell, computed once when you press Reset (with the\n\
+// Grid's init set to `code`). Return the cell's value, exactly like `rule` does.\n\
+//\n\
+// Helpers: centred(pos) is the position relative to the middle of the grid; in_box(p, origin,\n\
+// size), in_disc(p, centre, radius) and row_bit(row, x, width) describe shapes; chance(pos, p)\n\
+// is true for a fraction p of the cells. rand(pos, salt), params.<name> and globals.size work\n\
+// here too. In 1D mode only the first row is seeded, so use p.x alone.\n\
+fn seed(pos: vec2<u32>) -> vec4<f32> {\n\
+    let p = centred(pos);\n\
+    // A disc of random cells in the middle (in 1D mode: a short random segment).\n\
+    var d = length(vec2<f32>(p));\n\
+    if (globals.mode == 1u) { d = f32(abs(p.x)); }\n\
+    return on_if(d < 24.0 && chance(pos, 0.5));\n\
+}\n";
+
 const RENDER_PRELUDE: &str = r#"@group(0) @binding(0) var state: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> globals: Globals;
 @group(0) @binding(3) var<uniform> params: Params;
@@ -464,6 +527,14 @@ pub fn assemble_post(user: &str, params_struct: &str) -> Assembled {
     assemble(POST_PRELUDE, user, params_struct, POST_EPILOGUE)
 }
 
+/// The seed shader shares the rule's bindings and helpers (so `rand`, `on_if`, `params` and
+/// `globals` work), adds the shape helpers and dispatches `fn seed(pos)` over the whole grid
+/// (the first row only in 1D mode).
+pub fn assemble_seed(user: &str, params_struct: &str) -> Assembled {
+    let prelude = format!("{RULE_PRELUDE}{SEED_HELPERS}");
+    assemble(&prelude, user, params_struct, SEED_EPILOGUE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,6 +588,25 @@ mod tests {
     #[test]
     fn default_post_is_a_passthrough() {
         assert!(DEFAULT_POST.contains("return color;"));
+    }
+
+    #[test]
+    fn seed_offset_points_at_user_source_and_has_rule_bindings_plus_shape_helpers() {
+        let user = "fn seed(pos: vec2<u32>) -> vec4<f32> { return on_if(in_disc(centred(pos), vec2<i32>(0), 4.0)); }";
+        let a = assemble_seed(user, &params_wgsl(&[]));
+        let lines: Vec<&str> = a.source.lines().collect();
+        assert_eq!(lines[a.user_line_offset], user);
+        assert!(a.source.contains("@group(0) @binding(1) var dst: texture_storage_2d<rgba32float, write>;"));
+        for helper in ["fn centred(", "fn in_box(", "fn in_disc(", "fn row_bit(", "fn chance(", "fn rand("] {
+            assert!(a.source.contains(helper), "missing {helper}");
+        }
+        assert!(a.source.contains("textureStore(dst, pos, seed(pos));"));
+        assert!(a.source.contains("globals.mode == 1u && pos.y != 0u"), "1D mode seeds row 0 only");
+    }
+
+    #[test]
+    fn default_seed_defines_the_seed_function() {
+        assert!(DEFAULT_SEED.contains("fn seed(pos: vec2<u32>) -> vec4<f32>"));
     }
 
     #[test]

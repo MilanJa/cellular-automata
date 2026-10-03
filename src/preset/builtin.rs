@@ -10,6 +10,7 @@ pub struct Builtin {
     pub rule: &'static str,
     pub render: &'static str,
     pub post: Option<&'static str>,
+    pub seed: Option<&'static str>,
     /// Display name, parsed from `meta_toml` on first use so menus do not re-parse TOML per frame.
     name: OnceLock<String>,
 }
@@ -20,32 +21,36 @@ impl Builtin {
     }
 }
 
+/// `embedded!(id, dir)` embeds the three required files; add `post` and/or `seed` for the
+/// optional `post.wgsl` and `seed.wgsl`.
 macro_rules! embedded {
-    ($id:literal, $dir:literal) => {
+    ($id:literal, $dir:literal $(, $extra:ident)*) => {
         Builtin {
             id: $id,
             meta_toml: include_str!(concat!("../../presets/", $dir, "/preset.toml")),
             rule: include_str!(concat!("../../presets/", $dir, "/rule.wgsl")),
             render: include_str!(concat!("../../presets/", $dir, "/render.wgsl")),
-            post: None,
+            post: embedded!(@post $dir $(, $extra)*),
+            seed: embedded!(@seed $dir $(, $extra)*),
             name: OnceLock::new(),
         }
     };
-    ($id:literal, $dir:literal, post) => {
-        Builtin {
-            id: $id,
-            meta_toml: include_str!(concat!("../../presets/", $dir, "/preset.toml")),
-            rule: include_str!(concat!("../../presets/", $dir, "/rule.wgsl")),
-            render: include_str!(concat!("../../presets/", $dir, "/render.wgsl")),
-            post: Some(include_str!(concat!("../../presets/", $dir, "/post.wgsl"))),
-            name: OnceLock::new(),
-        }
+    (@post $dir:literal) => { None };
+    (@post $dir:literal, post $(, $rest:ident)*) => {
+        Some(include_str!(concat!("../../presets/", $dir, "/post.wgsl")))
     };
+    (@post $dir:literal, $other:ident $(, $rest:ident)*) => { embedded!(@post $dir $(, $rest)*) };
+    (@seed $dir:literal) => { None };
+    (@seed $dir:literal, seed $(, $rest:ident)*) => {
+        Some(include_str!(concat!("../../presets/", $dir, "/seed.wgsl")))
+    };
+    (@seed $dir:literal, $other:ident $(, $rest:ident)*) => { embedded!(@seed $dir $(, $rest)*) };
 }
 
 /// Ready-to-run examples, listed first in the preset dropdown. A `static` (not a `const`) so
-/// the cached names live in one place.
-pub static BUILTINS: [Builtin; 7] = [
+/// the cached names live in one place. New entries go at the end: tests and the default preset
+/// refer to the earlier ones by index.
+pub static BUILTINS: [Builtin; 10] = [
     embedded!("rule30", "rule30"),
     embedded!("rule110", "rule110"),
     embedded!("life", "life"),
@@ -53,6 +58,9 @@ pub static BUILTINS: [Builtin; 7] = [
     embedded!("gray_scott", "gray_scott"),
     embedded!("neon_life", "neon_life", post),
     embedded!("hex_life", "hex_life"),
+    embedded!("glider_gun", "glider_gun", seed),
+    embedded!("acorn", "acorn", seed),
+    embedded!("gray_scott_discs", "gray_scott_discs", seed),
 ];
 
 /// Commented starting points for new work, offered by the "New" menu.
@@ -77,6 +85,7 @@ pub fn load_builtin(b: &Builtin) -> Preset {
         render: b.render.to_string(),
         post: b.post.map(str::to_string),
         rule_b: None,
+        seed: b.seed.map(str::to_string),
         layer_b: None,
     }
 }
@@ -84,7 +93,8 @@ pub fn load_builtin(b: &Builtin) -> Preset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shader::assemble::{DEFAULT_POST, assemble_post, assemble_render, assemble_rule};
+    use crate::preset::InitPattern;
+    use crate::shader::assemble::{DEFAULT_POST, assemble_post, assemble_render, assemble_rule, assemble_seed};
     use crate::shader::params::{merge_params, params_wgsl, parse_params};
     use crate::shader::validate::{ShaderFile, validate};
 
@@ -98,8 +108,12 @@ mod tests {
             let post_src = preset.post.clone().unwrap_or_else(|| DEFAULT_POST.to_string());
             let post_params =
                 parse_params(&post_src).unwrap_or_else(|e| panic!("{what} {}: post params: {:?}", b.id, e));
+            let seed_src = preset.seed.clone().unwrap_or_default();
+            let seed_params =
+                parse_params(&seed_src).unwrap_or_else(|e| panic!("{what} {}: seed params: {:?}", b.id, e));
             let specs = merge_params(rule_params, render_params)
                 .and_then(|s| merge_params(s, post_params))
+                .and_then(|s| merge_params(s, seed_params))
                 .unwrap_or_else(|e| panic!("{what} {}: merge: {:?}", b.id, e));
             let pw = params_wgsl(&specs);
             let rule = assemble_rule(&preset.rule, &pw);
@@ -114,17 +128,43 @@ mod tests {
             if let Err(e) = validate(ShaderFile::Post, &post) {
                 panic!("{what} {}: post: {:?}\n{}", b.id, e, post.source);
             }
+            if preset.seed.is_some() {
+                let seed = assemble_seed(&seed_src, &pw);
+                if let Err(e) = validate(ShaderFile::Seed, &seed) {
+                    panic!("{what} {}: seed: {:?}\n{}", b.id, e, seed.source);
+                }
+            }
+            assert_eq!(
+                preset.meta.init == InitPattern::Code,
+                preset.seed.is_some(),
+                "{what} {}: a `code` init and a seed.wgsl go together",
+                b.id
+            );
             assert!(preset.meta.width > 0 && preset.meta.height > 0);
         }
     }
 
     #[test]
     fn builtins_have_unique_ids() {
-        assert_eq!(BUILTINS.len(), 7);
+        assert_eq!(BUILTINS.len(), 10);
         let mut ids: Vec<_> = BUILTINS.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 10);
+    }
+
+    #[test]
+    fn seeded_builtins_ship_a_seed_shader_and_a_code_init() {
+        for id in ["glider_gun", "acorn", "gray_scott_discs"] {
+            let b = BUILTINS.iter().find(|b| b.id == id).unwrap_or_else(|| panic!("{id} missing"));
+            let p = load_builtin(b);
+            assert_eq!(p.meta.init, InitPattern::Code, "{id}");
+            assert!(p.seed.as_deref().is_some_and(|s| s.contains("fn seed(pos: vec2<u32>) -> vec4<f32>")), "{id}");
+        }
+        // The seed-side slider of the Gray-Scott discs preset is declared in seed.wgsl only.
+        let discs = load_builtin(BUILTINS.iter().find(|b| b.id == "gray_scott_discs").unwrap());
+        let specs = parse_params(discs.seed.as_deref().unwrap()).unwrap();
+        assert!(specs.iter().any(|s| s.name == "discs"));
     }
 
     #[test]

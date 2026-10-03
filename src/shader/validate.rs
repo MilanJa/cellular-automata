@@ -9,6 +9,8 @@ pub enum ShaderFile {
     RuleB,
     Render,
     Post,
+    /// The optional initial-state shader, run once on Reset.
+    Seed,
 }
 
 impl ShaderFile {
@@ -18,6 +20,7 @@ impl ShaderFile {
             ShaderFile::RuleB => "rule_b.wgsl",
             ShaderFile::Render => "render.wgsl",
             ShaderFile::Post => "post.wgsl",
+            ShaderFile::Seed => "seed.wgsl",
         }
     }
 }

@@ -103,9 +103,39 @@ Exports go through it too. Neon Life uses it for bloom and trails; the *Post eff
 shows a CRT look (curvature, chromatic aberration, scanlines, vignette) with feedback. A preset
 stores it as `post.wgsl` next to the other two files.
 
+## Seeding with code
+
+The **Grid** popover's *init* chooses how Reset fills the grid: *random* cells at a density,
+*blank*, in 1D mode *single* (one live cell in the middle of the first row, the classic start for
+an elementary automaton), or **code**. With *code*, a fourth editor, **Seed (WGSL)**, computes every
+cell's starting value on the GPU once per Reset:
+
+    fn seed(pos: vec2<u32>) -> vec4<f32>
+
+It has the rule's helpers (`on_if`, `rand`, `params.<name>`, `globals.size`, `globals.seed`) plus
+a few for drawing:
+
+| Seed helper | Meaning |
+|------|---------|
+| `centred(pos) -> vec2<i32>` | the position relative to the middle of the grid |
+| `in_box(p, origin, size)` | inside the box with that top-left corner and size (cells) |
+| `in_disc(p, centre, radius)` | within `radius` cells of `centre` |
+| `row_bit(row, x, width)` | column `x` of a pattern row written as bits, most significant first |
+| `chance(pos, p)` | true for a fraction `p` of the cells, decided by the grid's seed value |
+
+Picking *code* when the editor is empty fills it with a starter (a disc of random cells).
+**Apply & reset** in the seed editor compiles and restarts in one go; a plain Apply (Ctrl+Enter)
+keeps the running grid until the next Reset. Sliders declared in the seed work like any other and
+take effect on Reset. In 1D mode only the first row is seeded. The shader is stored as
+`seed.wgsl` next to the other files, with `kind = "code"` under `[init]` in `preset.toml`.
+
+Three built-ins show the ways to draw a pattern: **Glider Gun** lists Gosper's gun as cell
+coordinates, **Acorn** draws a seven-cell methuselah as rows of bits, and **Gray-Scott Discs**
+writes the U and V channels directly for a ring of catalyst drops, with sliders for the ring.
+
 ## Parameters
 
-Declare live sliders in either shader with a comment:
+Declare live sliders in any shader with a comment:
 
     // @param threshold: f32 = 0.5 range 0.0 .. 1.0
     // @param n: i32 = 3 range 0 .. 8
@@ -127,15 +157,17 @@ generations back. `prev_cell` always reads the right row.
 
 ## Presets
 
-A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`. Folders under
+A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`, plus the optional
+`post.wgsl`, `rule_b.wgsl` and `seed.wgsl`. Folders under
 `./presets` appear in the dropdown (**File → Rescan presets** after adding one). **File → Save** (Ctrl+S) writes back to
 a preset's folder; **Save as…** picks a new folder; **Delete saved preset…** removes the folder
 (or the browser entry) after a confirmation and keeps the scene open, unsaved. Save writes the
 grid settings that are actually applied, so edits in the **Grid** popover (next to Reset) only reach the
 file after **Reset**. Built-ins: Rule 30, Rule 110, Game of
-Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule is plain Life but
-whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
-how much the render side alone can do.
+Life, Life-like (B/S), Gray-Scott reaction-diffusion, Neon Life, whose rule is plain Life but
+whose render shader draws glowing beads, age colours, halos and fading trails (a good example of
+how much the render side alone can do), Hex Life, and the three code-seeded ones: Glider Gun,
+Acorn and Gray-Scott Discs.
 
 ## Sharing a scene
 
@@ -212,11 +244,11 @@ browser downloads `<preset>-step<N>.png`.
 
 | Control | Action |
 |---------|--------|
-| Ctrl+Enter | apply both shaders |
+| Ctrl+Enter | apply all shaders |
 | Space (when no text field has focus) | play / pause |
 | Step | advance one step while paused |
 | steps/frame | simulation steps per rendered frame |
-| Reset | apply grid settings (mode, size, init pattern, seed) and re-initialise |
+| Reset | apply grid settings (mode, size, init pattern, seed) and re-initialise; a `code` init runs the seed shader |
 
 ## Web version
 

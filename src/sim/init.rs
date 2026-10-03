@@ -6,7 +6,8 @@ use rand_chacha::ChaCha8Rng;
 use crate::preset::{InitPattern, Mode};
 
 /// Returns `width * height * 4` floats (row-major RGBA). Alpha is always 1.
-/// In 1D mode only row 0 is populated.
+/// In 1D mode only row 0 is populated. `Code` yields a blank grid here: the seed shader fills
+/// it in on the GPU afterwards (see `Simulation::reset`).
 pub fn generate_init(pattern: &InitPattern, mode: Mode, width: u32, height: u32, seed: u32) -> Vec<f32> {
     let (w, h) = (width as usize, height as usize);
     let mut data = vec![0.0f32; w * h * 4];
@@ -18,7 +19,7 @@ pub fn generate_init(pattern: &InitPattern, mode: Mode, width: u32, height: u32,
         Mode::OneD => 1,
     };
     match pattern {
-        InitPattern::Blank => {}
+        InitPattern::Blank | InitPattern::Code => {}
         InitPattern::Single => {
             let x = w / 2;
             let y = match mode {
@@ -54,6 +55,14 @@ mod tests {
         for px in v.chunks(4) {
             assert_eq!(px, &[0.0, 0.0, 0.0, 1.0]);
         }
+    }
+
+    #[test]
+    fn code_starts_blank_on_the_cpu() {
+        assert_eq!(
+            generate_init(&InitPattern::Code, Mode::TwoD, 4, 2, 5),
+            generate_init(&InitPattern::Blank, Mode::TwoD, 4, 2, 0)
+        );
     }
 
     #[test]

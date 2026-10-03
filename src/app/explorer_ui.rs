@@ -67,7 +67,7 @@ impl Explorer {
                 let mut sim = Simulation::new(self.ctx.clone(), config);
                 sim.disable_history(); // thumbnails never rewind
                 let rule_a = validate(ShaderFile::Rule, &assemble_rule(&rule.rule_wgsl(), &pw)).ok()?;
-                sim.set_pipelines(&rule_a, &render, &post).ok()?;
+                sim.set_pipelines(&rule_a, &render, &post, None).ok()?;
                 sim.set_params(pack_params(&specs, &Default::default()));
                 sim.ensure_scene_size(THUMB_PX, THUMB_PX);
                 let view = sim.scene_view()?;

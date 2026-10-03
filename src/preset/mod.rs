@@ -25,9 +25,15 @@ pub enum Mode {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum InitPattern {
-    Random { density: f32 },
+    Random {
+        density: f32,
+    },
+    /// One live cell in the middle of the first row: the classic 1D start. In 2D a lone cell
+    /// dies at once, so the UI only offers it in 1D mode.
     Single,
     Blank,
+    /// The preset's `seed.wgsl` computes every cell's starting value on the GPU.
+    Code,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -61,6 +67,8 @@ pub struct Preset {
     pub post: Option<String>,
     /// Optional second rule (`rule_b.wgsl`) crossfaded with the first by `meta.blend`.
     pub rule_b: Option<String>,
+    /// Optional initial-state shader (`seed.wgsl`), used when `meta.init` is `Code`.
+    pub seed: Option<String>,
     /// Optional second automaton that runs alongside (a `layer_b/` sub-preset); the shaders read
     /// it through `other(x, y)`. A layer B's own `layer_b` is ignored.
     pub layer_b: Option<Box<Preset>>,
@@ -80,6 +88,7 @@ impl Preset {
         let render = std::fs::read_to_string(dir.join("render.wgsl")).context("reading render.wgsl")?;
         let post = std::fs::read_to_string(dir.join("post.wgsl")).ok();
         let rule_b = std::fs::read_to_string(dir.join("rule_b.wgsl")).ok();
+        let seed = std::fs::read_to_string(dir.join("seed.wgsl")).ok();
         let layer_dir = dir.join(LAYER_B_DIR);
         let layer_b = if preset_exists(&layer_dir) {
             let mut b = Preset::load_dir(&layer_dir).context("reading layer_b/")?;
@@ -88,7 +97,7 @@ impl Preset {
         } else {
             None
         };
-        Ok(Preset { meta, rule, render, post, rule_b, layer_b })
+        Ok(Preset { meta, rule, render, post, rule_b, seed, layer_b })
     }
 
     pub fn save_dir(&self, dir: &Path) -> anyhow::Result<()> {
@@ -107,6 +116,12 @@ impl Preset {
             Some(b) => std::fs::write(dir.join("rule_b.wgsl"), b)?,
             None => {
                 let _ = std::fs::remove_file(dir.join("rule_b.wgsl"));
+            }
+        }
+        match &self.seed {
+            Some(s) => std::fs::write(dir.join("seed.wgsl"), s)?,
+            None => {
+                let _ = std::fs::remove_file(dir.join("seed.wgsl"));
             }
         }
         let layer_dir = dir.join(LAYER_B_DIR);
@@ -248,6 +263,7 @@ mod tests {
             render: "fn shade() {}\n".into(),
             post: None,
             rule_b: None,
+            seed: None,
             layer_b: None,
         }
     }
@@ -270,6 +286,26 @@ mod tests {
         assert!(text.contains("kind = \"single\""));
         let back: PresetMeta = toml::from_str(&text).unwrap();
         assert_eq!(back.init, InitPattern::Single);
+    }
+
+    #[test]
+    fn code_init_serializes_and_the_seed_shader_is_saved_next_to_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = sample();
+        p.save_dir(dir.path()).unwrap();
+        assert!(!dir.path().join("seed.wgsl").exists(), "no seed file when there is no seed shader");
+        assert_eq!(Preset::load_dir(dir.path()).unwrap().seed, None);
+        p.meta.init = InitPattern::Code;
+        p.seed = Some("fn seed(pos: vec2<u32>) -> vec4<f32> { return on(); }\n".into());
+        p.save_dir(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("preset.toml")).unwrap();
+        assert!(text.contains("kind = \"code\""), "{text}");
+        assert!(dir.path().join("seed.wgsl").exists());
+        assert_eq!(Preset::load_dir(dir.path()).unwrap(), p);
+        // Dropping the seed shader again removes the file.
+        p.seed = None;
+        p.save_dir(dir.path()).unwrap();
+        assert!(!dir.path().join("seed.wgsl").exists());
     }
 
     #[test]

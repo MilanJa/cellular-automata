@@ -8,7 +8,9 @@ use crate::midi::mapping::{CcKey, MidiMap};
 use crate::platform::SavedLocation;
 
 use crate::preset::{InitPattern, Preset, PresetMeta, param_value_from_toml, param_value_to_toml};
-use crate::shader::assemble::{DEFAULT_POST, assemble_post, assemble_render, assemble_rule, assemble_rule_pair};
+use crate::shader::assemble::{
+    DEFAULT_POST, DEFAULT_SEED, assemble_post, assemble_render, assemble_rule, assemble_rule_pair, assemble_seed,
+};
 use crate::shader::params::{ParamError, ParamSpec, ParamValue, merge_params, params_wgsl, parse_params};
 use crate::shader::validate::{ShaderError, ShaderFile, Validated, validate, validate_pair};
 use crate::sim::SimConfig;
@@ -34,12 +36,15 @@ pub struct EditorState {
     pub render: String,
     /// Post-processing shader text; `DEFAULT_POST` when the preset has none.
     pub post: String,
+    /// Initial-state shader text; empty when the preset has none.
+    pub seed: String,
     /// True when the rule editor changed since the last successful apply.
     pub rule_dirty: bool,
     pub rule_b_dirty: bool,
     /// True when the render editor changed since the last successful apply.
     pub render_dirty: bool,
     pub post_dirty: bool,
+    pub seed_dirty: bool,
 }
 
 impl EditorState {
@@ -49,6 +54,7 @@ impl EditorState {
             ShaderFile::RuleB => self.rule_b_dirty = true,
             ShaderFile::Render => self.render_dirty = true,
             ShaderFile::Post => self.post_dirty = true,
+            ShaderFile::Seed => self.seed_dirty = true,
         }
     }
 
@@ -58,11 +64,12 @@ impl EditorState {
             ShaderFile::RuleB => self.rule_b_dirty,
             ShaderFile::Render => self.render_dirty,
             ShaderFile::Post => self.post_dirty,
+            ShaderFile::Seed => self.seed_dirty,
         }
     }
 
     pub fn any_dirty(&self) -> bool {
-        self.rule_dirty || self.rule_b_dirty || self.render_dirty || self.post_dirty
+        self.rule_dirty || self.rule_b_dirty || self.render_dirty || self.post_dirty || self.seed_dirty
     }
 
     pub fn clear_dirty(&mut self) {
@@ -70,10 +77,31 @@ impl EditorState {
         self.rule_b_dirty = false;
         self.render_dirty = false;
         self.post_dirty = false;
+        self.seed_dirty = false;
     }
 
     pub fn has_rule_b(&self) -> bool {
         !self.rule_b.trim().is_empty()
+    }
+
+    pub fn has_seed(&self) -> bool {
+        !self.seed.trim().is_empty()
+    }
+
+    /// Seed text for a preset: `None` when the editor is empty.
+    pub fn seed_for_preset(&self) -> Option<String> {
+        if self.has_seed() { Some(self.seed.clone()) } else { None }
+    }
+
+    /// Fills an empty seed editor with the starter seed (when the init is switched to `code`).
+    /// Returns true when it did.
+    pub fn ensure_seed(&mut self) -> bool {
+        if self.has_seed() {
+            return false;
+        }
+        self.seed = DEFAULT_SEED.to_string();
+        self.seed_dirty = true;
+        true
     }
 
     /// Rule B text for a preset: `None` when the editor is empty.
@@ -215,19 +243,30 @@ fn param_err(file: ShaderFile, e: ParamError) -> ShaderError {
     ShaderError { file, line: e.line.max(1), column: 1, message: e.message, hint: None }
 }
 
-/// Parses params from all three editors, merges them, assembles and validates the shaders.
-/// Returns every error found (rule, render, post order) or the specs plus the validated
-/// sources, ready for `Simulation::set_pipelines`.
-pub fn build_shaders(
-    editor: &EditorState,
-) -> Result<(Vec<ParamSpec>, Validated, Validated, Validated), Vec<ShaderError>> {
+/// The outcome of a successful `build_shaders`: the merged sliders and the validated sources,
+/// ready for `Simulation::set_pipelines`.
+#[derive(Debug, Clone)]
+pub struct BuiltShaders {
+    pub specs: Vec<ParamSpec>,
+    pub rule: Validated,
+    pub render: Validated,
+    pub post: Validated,
+    /// `None` when the seed editor is empty.
+    pub seed: Option<Validated>,
+}
+
+/// Parses params from every editor, merges them, assembles and validates the shaders. Returns
+/// every error found (rule, render, post, seed order) or the built shaders.
+pub fn build_shaders(editor: &EditorState) -> Result<BuiltShaders, Vec<ShaderError>> {
     let rule_params = parse_params(&editor.rule).map_err(|e| vec![param_err(ShaderFile::Rule, e)])?;
     let rule_b_params = parse_params(&editor.rule_b).map_err(|e| vec![param_err(ShaderFile::RuleB, e)])?;
     let render_params = parse_params(&editor.render).map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
     let post_params = parse_params(&editor.post).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
+    let seed_params = parse_params(&editor.seed).map_err(|e| vec![param_err(ShaderFile::Seed, e)])?;
     let specs = merge_params(rule_params, rule_b_params).map_err(|e| vec![param_err(ShaderFile::RuleB, e)])?;
     let specs = merge_params(specs, render_params).map_err(|e| vec![param_err(ShaderFile::Render, e)])?;
     let specs = merge_params(specs, post_params).map_err(|e| vec![param_err(ShaderFile::Post, e)])?;
+    let specs = merge_params(specs, seed_params).map_err(|e| vec![param_err(ShaderFile::Seed, e)])?;
     let pw = params_wgsl(&specs);
     let pair = editor.has_rule_b();
     let rule =
@@ -245,8 +284,15 @@ pub fn build_shaders(
     let rule = check(if pair { validate_pair(&rule) } else { validate(ShaderFile::Rule, &rule) });
     let render = check(validate(ShaderFile::Render, &render));
     let post = check(validate(ShaderFile::Post, &post));
-    match (rule, render, post) {
-        (Some(rule), Some(render), Some(post)) if errors.is_empty() => Ok((specs, rule, render, post)),
+    let seed = if editor.has_seed() {
+        check(validate(ShaderFile::Seed, &assemble_seed(&editor.seed, &pw))).map(Some)
+    } else {
+        Some(None)
+    };
+    match (rule, render, post, seed) {
+        (Some(rule), Some(render), Some(post), Some(seed)) if errors.is_empty() => {
+            Ok(BuiltShaders { specs, rule, render, post, seed })
+        }
         _ => Err(errors),
     }
 }
@@ -255,11 +301,19 @@ pub fn build_shaders(
 pub fn preset_to_state(preset: &Preset) -> (EditorState, SimConfig, u32, BTreeMap<String, toml::Value>) {
     // Modulations travel separately through `LoadedPreset::modulations`.
     let m = &preset.meta;
+    // A `code` init without a seed shader (a hand-edited file) gets the starter seed rather
+    // than a silently blank grid.
+    let seed = match (&preset.seed, &m.init) {
+        (Some(seed), _) => seed.clone(),
+        (None, InitPattern::Code) => DEFAULT_SEED.to_string(),
+        (None, _) => String::new(),
+    };
     let editor = EditorState {
         rule: preset.rule.clone(),
         rule_b: preset.rule_b.clone().unwrap_or_default(),
         render: preset.render.clone(),
         post: preset.post.clone().unwrap_or_else(|| DEFAULT_POST.to_string()),
+        seed,
         ..Default::default()
     };
     let init = match &m.init {
@@ -288,6 +342,7 @@ pub struct LoadedPreset {
     pub rule: Validated,
     pub render: Validated,
     pub post: Validated,
+    pub seed: Option<Validated>,
     pub toml_params: BTreeMap<String, toml::Value>,
     pub modulations: BTreeMap<String, Modulation>,
     pub midi: BTreeMap<String, CcKey>,
@@ -299,7 +354,7 @@ pub struct LoadedPreset {
 /// preset with a broken shader leaves the current session untouched.
 pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderError>> {
     let (editor, config, steps_per_frame, toml_params) = preset_to_state(preset);
-    let (specs, rule, render, post) = build_shaders(&editor)?;
+    let BuiltShaders { specs, rule, render, post, seed } = build_shaders(&editor)?;
     Ok(LoadedPreset {
         editor,
         config,
@@ -308,6 +363,7 @@ pub fn prepare_preset_load(preset: &Preset) -> Result<LoadedPreset, Vec<ShaderEr
         rule,
         render,
         post,
+        seed,
         toml_params,
         modulations: preset.meta.modulation.clone(),
         midi: preset.meta.midi.clone(),
@@ -354,6 +410,7 @@ pub fn state_to_preset(state: &AppState) -> Preset {
         render: state.editor.render.clone(),
         post: state.editor.post_for_preset(),
         rule_b: state.editor.rule_b_for_preset(),
+        seed: state.editor.seed_for_preset(),
         layer_b: state.layer_b_preset.clone().map(Box::new),
     }
 }
@@ -440,7 +497,7 @@ mod tests {
     fn preset_round_trips_through_state() {
         let p = load_builtin(&BUILTINS[2]);
         let (editor, config, spf, toml_params) = preset_to_state(&p);
-        let (specs, _, _, _) = build_shaders(&editor).unwrap();
+        let specs = build_shaders(&editor).unwrap().specs;
         let values = resolve_values(&specs, &toml_params, &BTreeMap::new());
         let state =
             AppState::from_parts(editor, config, spf, specs, values, p.meta.name.clone(), PresetSource::Builtin(2));
@@ -568,7 +625,7 @@ mod tests {
     fn build_shaders_merges_params_from_all_three_editors_and_validates_post() {
         let mut editor = preset_to_state(&load_builtin(&BUILTINS[2])).0;
         editor.post = "// @param strength: f32 = 0.5 range 0.0 .. 1.0\nfn post(uv: vec2<f32>, color: vec4<f32>) -> vec4<f32> { return color * params.strength; }\n".into();
-        let (specs, _, _, post) = build_shaders(&editor).unwrap();
+        let BuiltShaders { specs, post, .. } = build_shaders(&editor).unwrap();
         assert!(specs.iter().any(|s| s.name == "strength"));
         assert!(specs.iter().any(|s| s.name == "fade"));
         assert!(post.source().contains("params.strength"));
@@ -588,13 +645,74 @@ mod tests {
     }
 
     #[test]
+    fn build_shaders_compiles_the_seed_only_when_present_and_merges_its_params() {
+        let mut editor = preset_to_state(&load_builtin(&BUILTINS[2])).0;
+        assert!(!editor.has_seed());
+        assert!(build_shaders(&editor).unwrap().seed.is_none());
+        assert_eq!(editor.seed_for_preset(), None);
+        editor.seed = "// @param radius: f32 = 8.0 range 1.0 .. 64.0\nfn seed(pos: vec2<u32>) -> vec4<f32> { return on_if(in_disc(centred(pos), vec2<i32>(0), params.radius)); }\n".into();
+        let built = build_shaders(&editor).unwrap();
+        let seed = built.seed.expect("seed compiled");
+        assert_eq!(seed.file(), ShaderFile::Seed);
+        assert!(seed.source().contains("textureStore(dst, pos, seed(pos));"));
+        assert!(built.specs.iter().any(|s| s.name == "radius"), "seed params join the sliders");
+        assert!(built.rule.source().contains("radius"), "every shader sees the same Params struct");
+        editor.seed = "fn seed(pos: vec2<u32>) -> vec4<f32> { return 1.0; }\n".into();
+        let errs = build_shaders(&editor).unwrap_err();
+        assert!(errs.iter().all(|e| e.file == ShaderFile::Seed), "{errs:?}");
+        editor.seed = "  \n".into();
+        assert_eq!(editor.seed_for_preset(), None);
+    }
+
+    #[test]
+    fn ensure_seed_fills_an_empty_editor_with_the_starter_and_marks_it_dirty() {
+        let mut e = EditorState::default();
+        assert!(e.ensure_seed());
+        assert_eq!(e.seed, DEFAULT_SEED);
+        assert!(e.is_dirty(ShaderFile::Seed));
+        e.clear_dirty();
+        e.seed = "fn seed(pos: vec2<u32>) -> vec4<f32> { return on(); }\n".into();
+        assert!(!e.ensure_seed(), "an existing seed is left alone");
+        assert!(!e.is_dirty(ShaderFile::Seed));
+        // The starter seed compiles against Life.
+        let mut editor = preset_to_state(&load_builtin(&BUILTINS[2])).0;
+        editor.ensure_seed();
+        build_shaders(&editor).unwrap();
+    }
+
+    #[test]
+    fn seeded_presets_round_trip_through_state_and_a_code_init_without_a_seed_gets_the_starter() {
+        let gun = load_builtin(BUILTINS.iter().find(|b| b.id == "glider_gun").unwrap());
+        let loaded = prepare_preset_load(&gun).unwrap();
+        assert!(loaded.seed.is_some());
+        assert_eq!(loaded.config.init, InitPattern::Code);
+        let state = AppState::from_parts(
+            loaded.editor,
+            loaded.config,
+            loaded.steps_per_frame,
+            loaded.specs,
+            BTreeMap::new(),
+            loaded.name,
+            PresetSource::Imported,
+        );
+        let back = state_to_preset(&state);
+        assert_eq!(back.seed, gun.seed);
+        assert_eq!(back.meta.init, InitPattern::Code);
+        let mut bare = load_builtin(&BUILTINS[2]);
+        bare.meta.init = InitPattern::Code;
+        let (editor, config, _, _) = preset_to_state(&bare);
+        assert_eq!(editor.seed, DEFAULT_SEED);
+        assert_eq!(config.init, InitPattern::Code);
+    }
+
+    #[test]
     fn build_shaders_uses_the_pair_when_rule_b_is_present() {
         let mut editor = preset_to_state(&load_builtin(&BUILTINS[2])).0;
         assert!(editor.rule_b.is_empty());
-        let (_, rule, _, _) = build_shaders(&editor).unwrap();
+        let rule = build_shaders(&editor).unwrap().rule;
         assert!(!rule.source().contains("fn rule_b("));
         editor.rule_b = "fn rule(pos: vec2<u32>) -> vec4<f32> { return on_if(!alive(i32(pos.x), i32(pos.y)) && neighbours(i32(pos.x), i32(pos.y)) == 2u); }\n".into();
-        let (_, rule, _, _) = build_shaders(&editor).unwrap();
+        let rule = build_shaders(&editor).unwrap().rule;
         assert!(rule.source().contains("fn rule_b("));
         editor.rule_b = "fn rule(pos: vec2<u32>) -> vec4<f32> { return 1.0; }\n".into();
         let errs = build_shaders(&editor).unwrap_err();

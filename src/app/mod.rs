@@ -249,7 +249,7 @@ impl App {
             }
         };
         let mut sim = lock(&self.sim);
-        if let Err(errors) = sim.set_pipelines(&loaded.rule, &loaded.render, &loaded.post) {
+        if let Err(errors) = sim.set_pipelines(&loaded.rule, &loaded.render, &loaded.post, loaded.seed.as_ref()) {
             drop(sim);
             self.state.errors = errors;
             return;
@@ -293,25 +293,51 @@ impl App {
     }
 
     pub(crate) fn apply_shaders(&mut self) {
-        self.apply_shaders_with_toml(&BTreeMap::new());
+        let _ = self.apply_shaders_with_toml(&BTreeMap::new());
     }
 
-    fn apply_shaders_with_toml(&mut self, toml_params: &BTreeMap<String, toml::Value>) {
+    /// Compiles every editor and installs the pipelines. Returns true on success.
+    fn apply_shaders_with_toml(&mut self, toml_params: &BTreeMap<String, toml::Value>) -> bool {
         match build_shaders(&self.state.editor) {
-            Err(errors) => self.state.errors = errors,
-            Ok((specs, rule, render, post)) => {
-                let result = lock(&self.sim).set_pipelines(&rule, &render, &post);
+            Err(errors) => {
+                self.state.errors = errors;
+                false
+            }
+            Ok(built) => {
+                let result =
+                    lock(&self.sim).set_pipelines(&built.rule, &built.render, &built.post, built.seed.as_ref());
                 match result {
-                    Err(errors) => self.state.errors = errors,
+                    Err(errors) => {
+                        self.state.errors = errors;
+                        false
+                    }
                     Ok(()) => {
-                        self.state.values = resolve_values(&specs, toml_params, &self.state.values);
-                        self.state.specs = specs;
+                        self.state.values = resolve_values(&built.specs, toml_params, &self.state.values);
+                        self.state.specs = built.specs;
                         self.state.editor.clear_dirty();
                         self.state.errors.clear();
                         self.push_params();
+                        true
                     }
                 }
             }
+        }
+    }
+
+    /// The seed editor's shortcut: compile the editors and, when that worked, Reset so the new
+    /// seed shows. A failed compile leaves the grid alone and shows the errors.
+    pub(crate) fn apply_shaders_and_reset(&mut self) {
+        if self.apply_shaders_with_toml(&BTreeMap::new()) {
+            self.apply_settings_and_reset();
+        }
+    }
+
+    /// Grid init switched to `code`: make sure there is a seed shader and that it is compiled,
+    /// so the next Reset has something to run.
+    pub(crate) fn init_set_to_code(&mut self) {
+        self.state.modified = true;
+        if self.state.editor.ensure_seed() {
+            self.apply_shaders();
         }
     }
 
@@ -756,7 +782,7 @@ impl App {
             seed: loaded.config.seed,
         };
         let mut b = Simulation::new(self.ctx.clone(), config);
-        if let Err(errors) = b.set_pipelines(&loaded.rule, &loaded.render, &loaded.post) {
+        if let Err(errors) = b.set_pipelines(&loaded.rule, &loaded.render, &loaded.post, loaded.seed.as_ref()) {
             drop(a);
             self.state.errors = errors;
             return;

@@ -31,6 +31,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
     popover(ui, label, "Grid size, mode and initial pattern (take effect on Reset)", |ui| {
         theme::section_label(ui, "Grid");
         let before = app.state.pending.clone();
+        let mut chose_code = false;
         let p = &mut app.state.pending;
         egui::Grid::new("grid-settings").num_columns(2).show(ui, |ui| {
             ui.label("mode");
@@ -39,6 +40,10 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                 ui.selectable_value(&mut p.mode, Mode::OneD, "1D (space-time)");
             });
             ui.end_row();
+            // A single cell only means something in 1D: in 2D it dies on the first step.
+            if p.mode == Mode::TwoD && p.init == InitPattern::Single {
+                p.init = InitPattern::Random { density: 0.3 };
+            }
             ui.label("size");
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut p.width).range(1..=4096).speed(4));
@@ -49,10 +54,25 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
             ui.label("init");
             ui.horizontal(|ui| {
                 let is_random = matches!(p.init, InitPattern::Random { .. });
-                if ui.selectable_label(is_random, "random").clicked() && !is_random {
+                if ui.selectable_label(is_random, "random").on_hover_text("Random cells at the density below").clicked()
+                    && !is_random
+                {
                     p.init = InitPattern::Random { density: 0.3 };
                 }
-                if ui.selectable_label(p.init == InitPattern::Single, "single").clicked() {
+                if ui
+                    .selectable_label(p.init == InitPattern::Code, "code")
+                    .on_hover_text("The Seed shader (in the editors) computes every cell's starting value")
+                    .clicked()
+                {
+                    p.init = InitPattern::Code;
+                    chose_code = true;
+                }
+                if p.mode == Mode::OneD
+                    && ui
+                        .selectable_label(p.init == InitPattern::Single, "single")
+                        .on_hover_text("One live cell in the middle of the first row")
+                        .clicked()
+                {
                     p.init = InitPattern::Single;
                 }
                 if ui.selectable_label(p.init == InitPattern::Blank, "blank").clicked() {
@@ -76,6 +96,9 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
         });
         if app.state.pending != before {
             app.state.modified = true;
+        }
+        if chose_code {
+            app.init_set_to_code();
         }
         ui.separator();
         ui.horizontal(|ui| {
