@@ -646,29 +646,16 @@ impl Simulation {
             _pad: [0; 2],
         };
         self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+        // The seed shader runs at the start of the next `step`, not here: by then the pipelines
+        // are in place and the slider values it may read have been uploaded.
         self.needs_seed = c.init == InitPattern::Code;
-        self.run_seed_if_ready();
     }
 
-    /// Dispatches the seed shader over the blank grid left by `reset`, once the installed
-    /// pipelines are the ones to use. Without a seed shader a `Code` init simply stays blank.
-    fn run_seed_if_ready(&mut self) {
-        if !self.needs_seed {
-            return;
-        }
-        #[cfg(target_arch = "wasm32")]
-        if self.pending.is_some() {
-            return; // the pipelines being checked are the ones that should seed
-        }
-        let Some(pipelines) = &self.pipelines else { return };
-        self.needs_seed = false;
-        let Some(seed) = &pipelines.seed else { return };
+    /// Records the seed shader over the blank grid left by `reset`: read the (blank) other
+    /// texture, write the current one, then mirror it so both textures hold the start state.
+    fn record_seed(&self, encoder: &mut wgpu::CommandEncoder, seed: &wgpu::ComputePipeline) {
         let (w, h) = (self.config.width, self.config.height);
-        let mut encoder =
-            self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ca seed") });
         {
-            // Read the (blank) other texture, write the current one, then mirror it so both
-            // textures hold the start state (see `reset`).
             let mut pass = encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca seed"), timestamp_writes: None });
             pass.set_pipeline(seed);
@@ -678,8 +665,7 @@ impl Simulation {
                 Mode::OneD => pass.dispatch_workgroups(w.div_ceil(WORKGROUP), 1, 1),
             }
         }
-        copy_whole(&mut encoder, &self.textures.tex[self.cur], &self.textures.tex[1 - self.cur], w, h);
-        self.ctx.queue.submit([encoder.finish()]);
+        copy_whole(encoder, &self.textures.tex[self.cur], &self.textures.tex[1 - self.cur], w, h);
     }
 
     /// Replaces the whole state with `data` (`width * height * 4` floats) without touching the
@@ -760,7 +746,6 @@ impl Simulation {
     /// is attributed to the right file. On the desktop the scopes resolve synchronously and an
     /// error means nothing changes. In the browser they resolve later: the new pipelines wait in
     /// `pending` and are installed by `poll_pipeline_check` once the backend accepted them.
-    /// A reset that is waiting for a seed shader runs it once the pipelines are in.
     pub fn set_pipelines(
         &mut self,
         rule: &Validated,
@@ -800,7 +785,6 @@ impl Simulation {
         let errors = backend_errors(Self::SCOPE_FILES.into_iter().zip(results));
         if errors.is_empty() {
             self.pipelines = Some(pipelines);
-            self.run_seed_if_ready();
             Ok(())
         } else {
             Err(errors)
@@ -830,21 +814,18 @@ impl Simulation {
 
     /// Call once per frame. Resolves a browser-side backend check: installs the pending
     /// pipelines when the backend accepted them, or returns the errors (the previous pipelines
-    /// keep running). Either way a reset that waited for the check seeds now. Always `None` on
-    /// the desktop, where `set_pipelines` is synchronous.
+    /// keep running). Always `None` on the desktop, where `set_pipelines` is synchronous.
     pub fn poll_pipeline_check(&mut self) -> Option<Vec<ShaderError>> {
         #[cfg(target_arch = "wasm32")]
         {
             let errors = lock(&self.pending.as_ref()?.result).take()?;
             let pending = self.pending.take()?;
-            let outcome = if errors.is_empty() {
+            if errors.is_empty() {
                 self.pipelines = Some(pending.pipelines);
                 None
             } else {
                 Some(errors)
-            };
-            self.run_seed_if_ready();
-            outcome
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         None
@@ -950,6 +931,20 @@ impl Simulation {
             self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
             return;
         };
+        if self.needs_seed {
+            // A `Code` init owed by `reset`. In the browser, wait for the pipelines being
+            // checked: they are the ones that should seed, and stepping a blank grid with the
+            // old ones would only be undone.
+            #[cfg(target_arch = "wasm32")]
+            if self.pending.is_some() {
+                self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+                return;
+            }
+            self.needs_seed = false;
+            if let Some(seed) = &pipelines.seed {
+                self.record_seed(encoder, seed);
+            }
+        }
         if n == 0 {
             self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
             return;
@@ -1397,19 +1392,52 @@ mod gpu_tests {
         assert!(sim.needs_seed);
         assert!(live_cells(&read_back(&sim, 0)).is_empty());
         sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap();
-        assert!(!sim.needs_seed, "installing the pipelines pays the owed seed");
+        assert!(sim.needs_seed, "the seed waits for the next step, after the params upload");
+        assert!(step_and_check(&mut sim, 0).is_none());
+        assert!(!sim.needs_seed, "a zero-step frame pays the owed seed");
         assert_eq!(live_cells(&read_back(&sim, 0)), vec![2 * 16 + 3]);
         assert_eq!(live_cells(&read_back(&sim, 1)), vec![2 * 16 + 3], "the other texture mirrors the seed");
-        // Stepping Life kills the lone cell; a reset brings it back.
+        // Stepping Life kills the lone cell; a reset brings it back (seeded in the same step).
         assert!(step_and_check(&mut sim, 1).is_none());
         assert!(live_cells(&read_back(&sim, sim.cur)).is_empty());
         sim.reconfigure(cfg);
+        assert!(step_and_check(&mut sim, 0).is_none());
         assert_eq!(live_cells(&read_back(&sim, 0)), vec![2 * 16 + 3]);
         // Without a seed shader a code init stays blank, and nothing is left owed.
         sim.set_pipelines(&rule, &render, &post, None).unwrap();
         sim.reset();
+        assert!(step_and_check(&mut sim, 0).is_none());
         assert!(!sim.needs_seed);
         assert!(live_cells(&read_back(&sim, 0)).is_empty());
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn the_seed_shader_sees_the_slider_values_uploaded_after_the_pipelines() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let seed_src = "// @param radius: f32 = 0.0 range 0.0 .. 8.0\nfn seed(pos: vec2<u32>) -> vec4<f32> { return on_if(in_disc(centred(pos), vec2<i32>(0), params.radius)); }";
+        let specs = merge_params(parse_params(&p.rule).unwrap(), parse_params(&p.render).unwrap())
+            .and_then(|s| merge_params(s, parse_params(seed_src).unwrap()))
+            .unwrap();
+        let pw = params_wgsl(&specs);
+        let rule = validated_rule(&p.rule, &pw);
+        let render = validate(ShaderFile::Render, &assemble_render(&p.render, &pw)).unwrap();
+        let post = validate(ShaderFile::Post, &assemble_post(DEFAULT_POST, &pw)).unwrap();
+        let seed = validate(ShaderFile::Seed, &assemble_seed(seed_src, &pw)).unwrap();
+        let Some(mut sim) =
+            sim_with(SimConfig { mode: Mode::TwoD, width: 16, height: 16, init: InitPattern::Code, seed: 1 })
+        else {
+            return;
+        };
+        // The app's order: pipelines first, slider values second, then the frame.
+        sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("radius".to_string(), crate::shader::params::ParamValue::F32(3.0));
+        sim.set_params(pack_params(&specs, &values));
+        assert!(step_and_check(&mut sim, 0).is_none());
+        let live = live_cells(&read_back(&sim, 0)).len();
+        assert!((25..=32).contains(&live), "a radius-3 disc has about 29 cells, got {live}");
     }
 
     #[test]
@@ -1428,6 +1456,7 @@ mod gpu_tests {
             return;
         };
         sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap();
+        assert!(step_and_check(&mut sim, 0).is_none());
         let live = live_cells(&read_back(&sim, 0));
         assert_eq!(live, (0..16).collect::<Vec<_>>(), "row 0 is all on, the rows below stay blank");
         assert_eq!(read_back(&sim, 0), read_back(&sim, 1));
@@ -1452,6 +1481,7 @@ mod gpu_tests {
             let Some(mut sim) = sim_with(cfg) else { return };
             sim.set_params(pack_params(&specs, &std::collections::BTreeMap::new()));
             sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+            assert!(step_and_check(&mut sim, 0).is_none(), "{}: validation error while seeding", b.id);
             // Gray-Scott's seed writes U = 1 everywhere, so count the cells that differ from the bath.
             let data = read_back(&sim, 0);
             let distinct: std::collections::HashSet<[u32; 4]> =
@@ -1461,9 +1491,9 @@ mod gpu_tests {
         }
     }
 
-    /// A seeded built-in, set up at its own grid size with its default sliders.
-    fn seeded_builtin(id: &str) -> Option<Simulation> {
-        let p = load_builtin(BUILTINS.iter().find(|b| b.id == id).unwrap());
+    /// A seeded built-in, set up at its own grid size with its default sliders and seeded.
+    fn seeded_builtin(builtin_id: &str) -> Option<Simulation> {
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == builtin_id).unwrap());
         let seed_src = p.seed.clone().unwrap();
         let specs = merge_params(parse_params(&p.rule).unwrap(), parse_params(&p.render).unwrap())
             .and_then(|s| merge_params(s, parse_params(&seed_src).unwrap()))
@@ -1481,8 +1511,9 @@ mod gpu_tests {
             seed: p.meta.seed,
         };
         let mut sim = sim_with(cfg)?;
-        sim.set_params(pack_params(&specs, &std::collections::BTreeMap::new()));
         sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap();
+        sim.set_params(pack_params(&specs, &std::collections::BTreeMap::new()));
+        assert!(step_and_check(&mut sim, 0).is_none(), "{}: validation error while seeding", builtin_id);
         Some(sim)
     }
 
