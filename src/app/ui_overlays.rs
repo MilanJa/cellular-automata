@@ -1,4 +1,4 @@
-//! Small floating toolbars drawn over the viewport: the brush (always) and the seed-image
+//! Small floating toolbars drawn over the viewport: the brush (while hovering) and the seed-image
 //! settings (while an image is loaded). They live on the grid they act on, not in the sidebar.
 
 use super::App;
@@ -15,14 +15,22 @@ fn overlay_frame() -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(10, 6))
 }
 
-/// The brush toolbar in the viewport's bottom-left corner.
+/// The brush toolbar in the viewport's bottom-left corner. It fades in while the pointer is over
+/// the grid and out when it leaves, so the picture is unobstructed the rest of the time.
 pub fn brush(app: &mut App, ui: &egui::Ui, viewport: egui::Rect) {
-    egui::Area::new(egui::Id::new("brush-overlay"))
+    let id = egui::Id::new("brush-overlay");
+    let over = ui.input(|i| i.pointer.latest_pos()).is_some_and(|p| viewport.contains(p));
+    let opacity = ui.ctx().animate_bool(id.with("fade"), over);
+    if opacity <= 0.0 {
+        return;
+    }
+    egui::Area::new(id)
         .order(egui::Order::Middle)
         .pivot(egui::Align2::LEFT_BOTTOM)
         .fixed_pos(viewport.left_bottom() + egui::vec2(MARGIN, -MARGIN))
         .constrain_to(viewport)
         .show(ui.ctx(), |ui| {
+            ui.multiply_opacity(opacity);
             overlay_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("✎ brush").weak()).on_hover_text("Drag to paint, right button erases");
