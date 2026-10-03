@@ -3,6 +3,9 @@
 Live-code 1D and 2D cellular automata as WGSL compute shaders and render them with
 WGSL fragment shaders. Rust, egui, wgpu. Everything runs on the GPU.
 
+**Try it in the browser: <https://milanja.github.io/cellular-automata/>** (needs WebGPU:
+recent Chrome or Edge, Firefox 141+, Safari 26+). No install, nothing uploaded.
+
 New to shaders or to cellular automata? [`docs/tutorial/`](docs/tutorial/README.md) is a
 nine-chapter course that builds up from WGSL basics through Life, reaction-diffusion and 1D
 automata, with a runnable preset per chapter under **File → New from template → Tutorial**.
