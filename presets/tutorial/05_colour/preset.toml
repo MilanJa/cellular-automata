@@ -1,0 +1,12 @@
+name = "Tutorial 5: Colour and sliders"
+mode = "2d"
+width = 256
+height = 256
+steps_per_frame = 1
+seed = 21
+
+[init]
+kind = "random"
+density = 0.3
+
+[params]

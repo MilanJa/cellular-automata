@@ -76,6 +76,18 @@ pub static TEMPLATES: [Builtin; 9] = [
     embedded!("layer_driven", "templates/layer_driven"),
 ];
 
+/// The worked examples of `docs/tutorial/`, one per chapter that ends in a runnable preset,
+/// offered by the "New" menu under "Tutorial". Ids are `tutNN_<topic>`; `docs/tutorial/images`
+/// is rendered from them by `cargo run --example render_docs`.
+pub static TUTORIAL: [Builtin; 6] = [
+    embedded!("tut03_majority", "tutorial/03_majority"),
+    embedded!("tut04_life", "tutorial/04_life"),
+    embedded!("tut05_colour", "tutorial/05_colour"),
+    embedded!("tut06_seeds", "tutorial/06_seeds", seed),
+    embedded!("tut07_gray_scott", "tutorial/07_gray_scott", seed),
+    embedded!("tut08_elementary", "tutorial/08_elementary"),
+];
+
 pub fn load_builtin(b: &Builtin) -> Preset {
     let meta: PresetMeta =
         toml::from_str(b.meta_toml).unwrap_or_else(|e| panic!("embedded preset {} has invalid preset.toml: {e}", b.id));
@@ -191,6 +203,21 @@ mod tests {
     #[test]
     fn every_template_parses_and_validates() {
         check_all(&TEMPLATES, "template");
+    }
+
+    #[test]
+    fn every_tutorial_preset_parses_and_validates_and_is_numbered_like_its_chapter() {
+        check_all(&TUTORIAL, "tutorial");
+        let mut ids: Vec<_> = TUTORIAL.iter().map(|b| b.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), TUTORIAL.len());
+        for b in TUTORIAL.iter() {
+            let chapter = &b.id[3..5];
+            assert!(chapter.chars().all(|c| c.is_ascii_digit()), "{}: id should start with tutNN", b.id);
+            assert!(b.name().starts_with(&format!("Tutorial {}: ", chapter.trim_start_matches('0'))), "{}", b.name());
+            assert!(!BUILTINS.iter().any(|x| x.id == b.id), "{}: clashes with a built-in id", b.id);
+        }
     }
 
     #[test]

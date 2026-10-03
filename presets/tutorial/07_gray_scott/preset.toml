@@ -1,0 +1,11 @@
+name = "Tutorial 7: Reaction-diffusion"
+mode = "2d"
+width = 256
+height = 256
+steps_per_frame = 8
+seed = 3
+
+[init]
+kind = "code"
+
+[params]

@@ -3,6 +3,10 @@
 Live-code 1D and 2D cellular automata as WGSL compute shaders and render them with
 WGSL fragment shaders. Rust, egui, wgpu. Everything runs on the GPU.
 
+New to shaders or to cellular automata? [`docs/tutorial/`](docs/tutorial/README.md) is a
+nine-chapter course that builds up from WGSL basics through Life, reaction-diffusion and 1D
+automata, with a runnable preset per chapter under **File → New from template → Tutorial**.
+
 ## Run
 
     cargo run --release
@@ -66,7 +70,8 @@ the error panel shows the line and, for the common mistakes, a plain-language hi
 **File → New from template** creates an unsaved preset from a commented skeleton that runs as-is:
 *2D binary*, *Life-like with B/S switches* (no code, just checkboxes), *1D elementary*,
 *2D continuous* (diffusion with a reaction term), and *Render only* (Life with a render shader
-to play with). Edit, press Ctrl+Enter, then **File → Save as…** when you like the result.
+to play with). Edit, press Ctrl+Enter, then **File → Save as…** when you like the result. The
+same menu lists the tutorial's presets, one per chapter of [`docs/tutorial/`](docs/tutorial/README.md).
 
 Compile errors show in the bottom panel with the line number in *your* source. Click an
 error to jump to it. The previous working shader keeps running until the new one compiles.

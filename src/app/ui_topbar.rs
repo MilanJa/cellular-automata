@@ -3,7 +3,7 @@ use super::state::PresetSource;
 use super::theme;
 use crate::platform;
 use crate::preset::Preset;
-use crate::preset::builtin::{BUILTINS, TEMPLATES, load_builtin};
+use crate::preset::builtin::{BUILTINS, TEMPLATES, TUTORIAL, load_builtin};
 use crate::util::lock;
 
 pub const SAVE_SHORTCUT: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
@@ -34,6 +34,14 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
             for (i, t) in TEMPLATES.iter().enumerate() {
                 if ui.button(t.name()).clicked() {
                     app.load_template(i);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            ui.label(egui::RichText::new("Tutorial (docs/tutorial in the repository)").small().weak());
+            for (i, t) in TUTORIAL.iter().enumerate() {
+                if ui.button(t.name()).clicked() {
+                    app.load_tutorial(i);
                     ui.close();
                 }
             }

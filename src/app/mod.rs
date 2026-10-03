@@ -27,7 +27,7 @@ use crate::midi::MidiReceiver;
 use crate::midi::mapping::{CcKey, MidiMap, apply_cc};
 use crate::platform::{self, SavedLocation};
 use crate::preset::Preset;
-use crate::preset::builtin::{BUILTINS, TEMPLATES, load_builtin};
+use crate::preset::builtin::{BUILTINS, TEMPLATES, TUTORIAL, load_builtin};
 use crate::preset::bundle::{from_bundle, to_bundle};
 use crate::shader::params::{ParamValue, pack_params};
 use crate::shader::validate::ShaderFile;
@@ -283,6 +283,13 @@ impl App {
         preset.meta.name = format!("Untitled ({})", preset.meta.name);
         self.load_preset(preset, PresetSource::Template(index));
         self.state.modified = true;
+    }
+
+    /// Opens one of the tutorial chapters' presets. Unlike a template it keeps its name and
+    /// starts clean: it is a worked example to read and tweak, saved only if the reader wants.
+    pub(crate) fn load_tutorial(&mut self, index: usize) {
+        let Some(t) = TUTORIAL.get(index) else { return };
+        self.load_preset(load_builtin(t), PresetSource::Tutorial(index));
     }
 
     pub(crate) fn load_saved(&mut self, location: SavedLocation) {

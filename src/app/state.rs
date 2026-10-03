@@ -23,6 +23,8 @@ pub const MAX_GRID_SIZE: u32 = 4096;
 pub enum PresetSource {
     Builtin(usize),
     Template(usize),
+    /// One of the tutorial chapters' presets (`builtin::TUTORIAL`).
+    Tutorial(usize),
     /// Imported from a bundle file; not stored anywhere yet.
     Imported,
     Saved(SavedLocation),
