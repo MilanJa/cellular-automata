@@ -8,8 +8,8 @@ use crate::util::lock;
 
 pub const SAVE_SHORTCUT: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
 
-/// Menu bar: File / Image / View menus, the preset picker, transport controls and the status
-/// readout pinned to the right.
+/// Menu bar: File / Image / View menus, the preset picker, transport controls with the grid
+/// settings, the microphone and MIDI toggles, and the status readout pinned to the right.
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     egui::containers::menu::MenuBar::new().ui(ui, |ui| {
         file_menu(app, ui);
@@ -19,6 +19,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         preset_picker(app, ui);
         ui.separator();
         transport(app, ui);
+        ui.separator();
+        super::ui_inputs::audio(app, ui);
+        super::ui_inputs::midi(app, ui);
         status(app, ui);
     });
 }
@@ -158,6 +161,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui) {
     if ui.button("↺ Reset").on_hover_text("Apply grid settings and re-initialise").clicked() {
         app.apply_settings_and_reset();
     }
+    super::ui_inputs::grid(app, ui);
 }
 
 fn status(app: &mut App, ui: &mut egui::Ui) {

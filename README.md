@@ -73,7 +73,7 @@ error to jump to it. The previous working shader keeps running until the new one
 
 ## Layers
 
-**Layer B** (Params panel) runs a second preset alongside the main one at the same grid size.
+**Layer B** (sidebar, under Params) runs a second preset alongside the main one at the same grid size.
 Both layers' rule and render shaders can read the other layer's previous state with
 `other(x, y)` and `other_alive(x, y)` (zeros when no layer B is loaded), so one automaton can
 gate, seed or colour another. The *Driven by layer B* template is Life that can only grow where
@@ -117,7 +117,7 @@ editors; values survive re-applies as long as the name and type stay the same.
 
 ## 1D automata
 
-Switch **Grid → mode** to *1D (space-time)*. The grid becomes a space-time diagram: each step
+Switch **Grid → mode** (the Grid popover next to Reset) to *1D (space-time)*. The grid becomes a space-time diagram: each step
 writes the next row below the previous one, and once the bottom is reached the diagram scrolls.
 Use `prev_cell(x - 1)`, `prev_cell(x)`, `prev_cell(x + 1)` for an elementary automaton.
 
@@ -131,8 +131,8 @@ A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`. Fo
 `./presets` appear in the dropdown (**File → Rescan presets** after adding one). **File → Save** (Ctrl+S) writes back to
 a preset's folder; **Save as…** picks a new folder; **Delete saved preset…** removes the folder
 (or the browser entry) after a confirmation and keeps the scene open, unsaved. Save writes the
-grid settings that are actually applied, so edits in the Grid section only reach the file after
-**Reset**. Built-ins: Rule 30, Rule 110, Game of
+grid settings that are actually applied, so edits in the **Grid** popover (next to Reset) only reach the
+file after **Reset**. Built-ins: Rule 30, Rule 110, Game of
 Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule is plain Life but
 whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
 how much the render side alone can do.
@@ -177,27 +177,27 @@ snapshot; press Play to continue from there. Reset clears the history.
 
 **Image → Seed grid from image…** (or drop a PNG onto the window) resamples the picture onto the
 grid. *Brightness → on/off* thresholds the luminance into live cells; *RGBA → channels* copies
-the four colour channels into the four cell channels. Change the mode or threshold and press
-**Re-apply image** to try again. Dropping a `*.capreset.toml` bundle imports it as a preset.
+the four colour channels into the four cell channels. A toolbar appears over the viewport while an image is loaded: change the mode or threshold and
+press **Re-apply** to try again, or **✕** to forget the image. Dropping a `*.capreset.toml` bundle imports it as a preset.
 
 ## Audio reactivity
 
-**Audio → Enable microphone** (Params panel) opens the default input; the browser asks for
+The **○ mic** toggle in the top bar opens the default input; the browser asks for
 permission. Four live levels (overall, low, mid, high band, each auto-gained to 0..1) appear as
-meters and as sources in every slider's **~** menu next to the waves. Audio sources are
+meters in that popover and as sources in every slider's **~** menu next to the waves. Audio sources are
 unipolar: silence leaves the slider's value, sound pushes it up by `amount` of its range.
 
 ## MIDI controllers
 
-**MIDI → Enable MIDI** (Params panel) opens every connected input (the browser asks for
+The **○ MIDI** toggle in the top bar opens every connected input (the browser asks for
 permission). Open a slider's **~** menu and press **Learn**, then move a knob: that controller
 now drives the value across its range. Bindings are saved with the preset (`[midi]` table) and
-listed in the MIDI section. One knob drives one value; learning it again moves it.
+listed in the MIDI popover. One knob drives one value; learning it again moves it.
 
 ## Painting
 
-Drag on the grid with the left mouse button to paint cells, right button to erase. **Brush** (under
-Grid) sets the radius in cells and the value written, default `on()` = (1, 0, 0, 1); for a
+Drag on the grid with the left mouse button to paint cells, right button to erase. The **brush**
+toolbar in the corner of the viewport sets the radius in cells and the value written, default `on()` = (1, 0, 0, 1); for a
 continuous rule such as Gray-Scott, paint into the channel the rule reads (for example
 `0, 1, 0, 1` to seed V). In 1D mode a stroke lands on the most recently written row, which is
 what the next generation reads. Painting works while paused.

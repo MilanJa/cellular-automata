@@ -8,6 +8,8 @@ pub mod state;
 pub mod theme;
 mod ui_editor;
 mod ui_errors;
+mod ui_inputs;
+mod ui_overlays;
 mod ui_params;
 mod ui_topbar;
 
@@ -1061,6 +1063,8 @@ impl eframe::App for App {
                 .inner;
             self.last_viewport = Some(rect);
             self.collect_strokes(&response, rect);
+            ui_overlays::brush(self, ui, rect);
+            ui_overlays::seed_image(self, ui, rect);
             ui_topbar::timeline(self, ui);
         });
 
