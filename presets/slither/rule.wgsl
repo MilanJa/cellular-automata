@@ -5,11 +5,11 @@
 // Every `every` steps the snakes move: the cell in front of a head becomes the new head and
 // the tail cell (the one nobody points at) empties, unless the snake still owes itself growth.
 // Heads steer towards the smell of shorter snakes and away from longer ones (the scent field is
-// layer B, read with other()). A head that moves into a cell of a shorter snake eats it: the
-// eater grows by the bitten-off part and the victim's cut-off chain dies from the break, one
-// cell per step. A head that runs into a clearly longer snake dies; one of about its own size
-// only blocks it. A snake never bites or runs into itself: its own body only ever blocks it,
-// and the steering avoids dead ends.
+// layer B, read with other()). A head that moves into a cell of a clearly shorter snake eats
+// it: the eater grows by the bitten-off part and the victim's cut-off chain dies from the
+// break, one cell per step. A head that runs into a clearly longer snake dies; one of about its
+// own size only blocks it. A snake never bites or runs into itself: its own body only ever
+// blocks it, and the steering avoids dead ends.
 //
 // Food is a fourth kind of cell: it never moves, smells like a very small snake so every head
 // is drawn to it, and feeds one cell of growth to the head that moves onto it.
@@ -19,11 +19,13 @@
 //               .g = growth this cell will spend once it is the tail: the size of the meal
 //                    that created it (a cell keeps this value for life, so it reaches the
 //                    tail exactly once; starter snakes carry their initial growth this way)
-//               .b = stamp + 2048 * moves   The head counts its moves. Every cell is stamped
-//                    with the count at its birth and keeps hearing the latest count from the
-//                    cells ahead, so its index from the head is (moves - stamp): a difference
-//                    of counters, which a waiting head cannot inflate. (Both wrap at 2048.)
-//               .a = the snake's length as this cell knows it (flows tail -> head)
+//               .b = stamp + 2048 * moves   The head counts its moves and every cell is stamped
+//                    with the count at its birth, so a cell's index from the head is
+//                    (moves - stamp). The count travels down the chain.
+//               .a = the tail's stamp, as last heard here. It travels up the chain, and the
+//                    snake's length is (moves - tail stamp + 1): exact at the head between
+//                    changes, and when it is off it is off on the long side, so a snake never
+//                    underestimates itself. (All counters wrap at 2048.)
 // Everything a cell decides, its neighbours can recompute from the same previous state, which
 // is how a head and the cell it moves into agree without talking.
 // @param every: i32 = 3 range 1 .. 20
@@ -39,8 +41,6 @@ const EMPTY = 0;
 const BODY = 1;
 const HEAD = 2;
 const FOOD = 3;
-// Food counts as a snake of length one half, so even a lone head may eat it.
-const FOOD_LENGTH = 0.5;
 const NOBODY = vec2<i32>(-9999, -9999);
 const WRAP = 2048;
 const DIRS = array<vec2<i32>, 8>(
@@ -72,13 +72,30 @@ fn moves_of(c: vec4<f32>) -> i32 {
     return i32(round(c.b)) / WRAP;
 }
 
-fn index_of(c: vec4<f32>) -> i32 {
-    return (moves_of(c) - stamp_of(c) + WRAP) % WRAP;
+fn tail_stamp_of(c: vec4<f32>) -> i32 {
+    return i32(round(c.a));
 }
 
-fn snake(kind: i32, dir: i32, id: i32, growth: i32, stamp: i32, moves: i32, len: f32) -> vec4<f32> {
-    let counters = ((stamp % WRAP) + WRAP) % WRAP + WRAP * (((moves % WRAP) + WRAP) % WRAP);
-    return vec4<f32>(f32(kind * 8 + dir + 32 * id), f32(growth), f32(counters), len);
+// Difference of two wrapping counters.
+fn since(later: i32, earlier: i32) -> i32 {
+    return ((later - earlier) % WRAP + WRAP) % WRAP;
+}
+
+fn index_of(c: vec4<f32>) -> i32 {
+    return since(moves_of(c), stamp_of(c));
+}
+
+// The length of the snake a cell belongs to, as that cell knows it. Food counts as one half.
+fn len_of(c: vec4<f32>) -> f32 {
+    if (kind_of(c) == FOOD) {
+        return 0.5;
+    }
+    return f32(since(moves_of(c), tail_stamp_of(c)) + 1);
+}
+
+fn snake(kind: i32, dir: i32, id: i32, growth: i32, stamp: i32, moves: i32, tail_stamp: i32) -> vec4<f32> {
+    let counters = since(stamp, 0) + WRAP * since(moves, 0);
+    return vec4<f32>(f32(kind * 8 + dir + 32 * id), f32(growth), f32(counters), f32(since(tail_stamp, 0)));
 }
 
 fn empty() -> vec4<f32> {
@@ -86,7 +103,7 @@ fn empty() -> vec4<f32> {
 }
 
 fn food() -> vec4<f32> {
-    return snake(FOOD, 0, 0, 0, 0, 0, FOOD_LENGTH);
+    return snake(FOOD, 0, 0, 0, 0, 0, 0);
 }
 
 fn moving() -> bool {
@@ -99,18 +116,18 @@ fn wrapped(p: vec2<i32>) -> vec2<u32> {
 }
 
 // Can the snake `me` (id, length) move into the cell holding `tc`? Empty cells and food, yes;
-// another snake only when it is clearly shorter (lengths are estimates that lag behind growth,
-// so "clearly" leaves a margin); its own body and anything of about its size or longer, no.
+// another snake only when it is clearly shorter (a margin, since lengths can run a little
+// long); its own body and anything of about its size or longer, no.
 fn can_enter(tc: vec4<f32>, my_id: i32, my_len: f32) -> bool {
     let k = kind_of(tc);
-    return k == EMPTY || k == FOOD || (id_of(tc) != my_id && tc.a * 1.15 + 1.0 < my_len);
+    return k == EMPTY || k == FOOD || (id_of(tc) != my_id && len_of(tc) * 1.15 + 1.0 < my_len);
 }
 
 // Would entering the cell holding `tc` kill the snake `me`? Only another snake that is clearly
 // longer, half again plus two cells; anything between that and "clearly shorter" only blocks.
 fn is_deadly(tc: vec4<f32>, my_id: i32, my_len: f32) -> bool {
     let k = kind_of(tc);
-    return (k == BODY || k == HEAD) && id_of(tc) != my_id && tc.a > my_len * 1.5 + 2.0;
+    return (k == BODY || k == HEAD) && id_of(tc) != my_id && len_of(tc) > my_len * 1.5 + 2.0;
 }
 
 // Where the head at `p` (state `h`) moves this step. Every direction but straight back is a
@@ -120,7 +137,7 @@ fn is_deadly(tc: vec4<f32>, my_id: i32, my_len: f32) -> bool {
 fn decide(p: vec2<i32>, h: vec4<f32>) -> i32 {
     let d = dir_of(h);
     let my_id = id_of(h);
-    let my_len = h.a;
+    let my_len = len_of(h);
     var best = d;
     var best_score = -1e30;
     for (var k = -3; k <= 3; k++) {
@@ -173,7 +190,8 @@ fn taker_of(t: vec2<i32>) -> vec2<i32> {
         if (kind_of(nc) != HEAD) {
             continue;
         }
-        if (!can_enter(tc, id_of(nc), nc.a)) {
+        let n_len = len_of(nc);
+        if (!can_enter(tc, id_of(nc), n_len)) {
             continue;
         }
         let c = decide(n, nc);
@@ -181,9 +199,9 @@ fn taker_of(t: vec2<i32>) -> vec2<i32> {
             continue;
         }
         let tie = rand(wrapped(n), globals.frame);
-        if (nc.a > best_len || (nc.a == best_len && tie > best_tie)) {
+        if (n_len > best_len || (n_len == best_len && tie > best_tie)) {
             best = n;
-            best_len = nc.a;
+            best_len = n_len;
             best_tie = tie;
         }
     }
@@ -195,10 +213,10 @@ fn taker_of(t: vec2<i32>) -> vec2<i32> {
 fn arriving_head(taker: vec2<i32>, gained: i32) -> vec4<f32> {
     let tc = cell(taker.x, taker.y);
     let moves = moves_of(tc) + 1;
-    return snake(HEAD, decide(taker, tc), id_of(tc), gained, moves, moves, tc.a);
+    return snake(HEAD, decide(taker, tc), id_of(tc), gained, moves, moves, tail_stamp_of(tc));
 }
 
-// True when `c` is a cell of snake `id` (body, or head) that can pass the move count on.
+// True when `c` is a cell of snake `id` (body, or head) that can pass counters on.
 fn same_snake(c: vec4<f32>, id: i32) -> bool {
     let k = kind_of(c);
     return (k == BODY || k == HEAD) && id_of(c) == id;
@@ -224,7 +242,7 @@ fn rule(pos: vec2<u32>) -> vec4<f32> {
             if (roll < params.spawn) {
                 let heading = i32(rand(pos, 77u) * 8.0) % 8;
                 let id = 1 + i32(rand(pos, 78u) * 4094.0);
-                return snake(HEAD, heading, id, params.spawn_length, 0, 0, 1.0);
+                return snake(HEAD, heading, id, params.spawn_length, 0, 0, 0);
             }
             if (roll < params.spawn + params.food) {
                 return food();
@@ -247,40 +265,53 @@ fn rule(pos: vec2<u32>) -> vec4<f32> {
     if (k == HEAD) {
         let my_id = id_of(c);
         let moves = moves_of(c);
-        // My length is whatever the segment behind me knows; a lone head is a snake of one.
+        // The tail's stamp reaches me through the segment behind me; a lone head is its own tail.
         let back = p - DIRS[dir_of(c)];
         let bc = cell(back.x, back.y);
         let has_body = kind_of(bc) == BODY && dir_of(bc) == dir_of(c) && id_of(bc) == my_id;
-        let len = select(1.0, bc.a, has_body);
-        if (advancing && !has_body && growth_of(c) == 0) {
-            return empty(); // nothing behind it and nothing to grow: a bitten-off remnant starves
-        }
+        let tail_stamp = select(moves, tail_stamp_of(bc), has_body);
         if (!advancing) {
-            return snake(HEAD, dir_of(c), my_id, growth_of(c), moves, moves, len);
+            return snake(HEAD, dir_of(c), my_id, growth_of(c), moves, moves, tail_stamp);
         }
         // Eaten by a longer head moving in? It takes this cell and gains the body behind it.
+        // This comes before anything that would remove the cell on its own: the eater has
+        // already turned its old head into a neck on the strength of this cell being here.
         let taker = taker_of(p);
         if (taker.x > -9000) {
-            return arriving_head(taker, max(i32(round(c.a)) - 1, 0));
+            return arriving_head(taker, max(i32(len_of(c)) - 1, 0));
+        }
+        if (!has_body && growth_of(c) == 0) {
+            return empty(); // nothing behind it and nothing to grow: a bitten-off remnant starves
         }
         let d = decide(p, c);
         let t = p + DIRS[d];
         let tc = cell(t.x, t.y);
-        if (is_deadly(tc, my_id, c.a)) {
+        if (is_deadly(tc, my_id, len_of(c))) {
             return empty(); // ran into something clearly longer than myself: dead
         }
         if (all(taker_of(t) == p)) {
             // Moved on: this cell is now my neck, born at move `moves`, and it already knows
             // the head has made one more.
-            return snake(BODY, d, my_id, growth_of(c), moves, moves + 1, len);
+            return snake(BODY, d, my_id, growth_of(c), moves, moves + 1, tail_stamp);
         }
         // Blocked: lost the race for that cell, or it holds something I may not enter (my own
         // body, or a snake of about my size). Wait for the way to clear; the counter stays.
-        return snake(HEAD, dir_of(c), my_id, growth_of(c), moves, moves, len);
+        return snake(HEAD, dir_of(c), my_id, growth_of(c), moves, moves, tail_stamp);
     }
 
-    // BODY. Still attached? The segment ahead must be my body, or my head that came from here.
+    // BODY. Bitten by a longer head moving in? It takes this cell and gains everything behind
+    // it, which dies. Checked before anything else, for the same reason as above: the biter is
+    // already counting on this cell.
     let my_id = id_of(c);
+    let stamp = stamp_of(c);
+    if (advancing) {
+        let taker = taker_of(p);
+        if (taker.x > -9000) {
+            // Cells behind me are the stamps between mine and the tail's.
+            return arriving_head(taker, max(since(stamp, tail_stamp_of(c)) - 1, 0));
+        }
+    }
+    // Still attached? The segment ahead must be my body, or my head that came from here.
     let d = dir_of(c);
     let ahead = p + DIRS[d];
     let ac = cell(ahead.x, ahead.y);
@@ -289,19 +320,19 @@ fn rule(pos: vec2<u32>) -> vec4<f32> {
     if (!attached) {
         return empty(); // cut off: the break travels down the chain
     }
-    // Is there a segment behind me (one of mine that points at me)? Length news comes from the
-    // tail along the chain; taking it from two segments back, when there are two, carries it
-    // twice as fast, so a bitten snake learns its new size and a growing one its growth sooner.
+    // Is there a segment behind me (one of mine that points at me)? The tail's stamp comes up
+    // the chain from it; taking it from two segments back, when there are two, carries it
+    // twice as fast.
     var has_tail = false;
     var behind = p;
-    var tail_len = 0.0;
+    var tail_stamp = stamp;
     for (var i = 0; i < 8; i++) {
         let n = p + DIRS[i];
         let nc = cell(n.x, n.y);
         if (kind_of(nc) == BODY && id_of(nc) == my_id && all(n + DIRS[dir_of(nc)] == p)) {
             has_tail = true;
             behind = n;
-            tail_len = nc.a;
+            tail_stamp = tail_stamp_of(nc);
         }
     }
     if (has_tail) {
@@ -309,7 +340,7 @@ fn rule(pos: vec2<u32>) -> vec4<f32> {
             let m = behind + DIRS[i];
             let mc = cell(m.x, m.y);
             if (kind_of(mc) == BODY && id_of(mc) == my_id && all(m + DIRS[dir_of(mc)] == behind)) {
-                tail_len = mc.a;
+                tail_stamp = tail_stamp_of(mc);
             }
         }
     }
@@ -319,26 +350,16 @@ fn rule(pos: vec2<u32>) -> vec4<f32> {
     if (ak == BODY) {
         let further = ahead + DIRS[dir_of(ac)];
         let fc = cell(further.x, further.y);
-        if (same_snake(fc, my_id) && ((moves_of(fc) - moves + WRAP) % WRAP) < WRAP / 2) {
+        if (same_snake(fc, my_id) && since(moves_of(fc), moves) < WRAP / 2) {
             moves = moves_of(fc);
         }
     }
-    let stamp = stamp_of(c);
-    let index = (moves - stamp + WRAP) % WRAP;
-    let len = select(f32(index + 1), tail_len, has_tail);
-    if (advancing) {
-        let taker = taker_of(p);
-        if (taker.x > -9000) {
-            // Bitten: the eater takes this cell and gains everything behind it, which dies.
-            return arriving_head(taker, max(i32(round(c.a)) - index_of(c) - 1, 0));
+    if (advancing && !has_tail) {
+        // The tail: spend one of the growth this cell carries, or move on.
+        if (growth_of(c) == 0) {
+            return empty();
         }
-        if (!has_tail) {
-            // The tail: spend one of the growth this cell carries, or move on.
-            if (growth_of(c) == 0) {
-                return empty();
-            }
-            return snake(BODY, d, my_id, growth_of(c) - 1, stamp, moves, len);
-        }
+        return snake(BODY, d, my_id, growth_of(c) - 1, stamp, moves, tail_stamp);
     }
-    return snake(BODY, d, my_id, growth_of(c), stamp, moves, len);
+    return snake(BODY, d, my_id, growth_of(c), stamp, moves, tail_stamp);
 }

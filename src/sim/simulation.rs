@@ -1878,8 +1878,14 @@ mod gpu_tests {
             (heads, bodies)
         };
         let food_cells = |sim: &Simulation| read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 3).count();
+        // A snake's length is its head's move count (.b / 2048) minus the tail's stamp (.a) plus
+        // one, with the counters wrapping at 2048.
+        let length = |c: &[f32]| {
+            let moves = c[2].round() as i32 / 2048;
+            (((moves - c[3].round() as i32) % 2048 + 2048) % 2048 + 1) as f32
+        };
         let longest = |sim: &Simulation| {
-            read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 2).map(|c| c[3]).fold(0.0, f32::max)
+            read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 2).map(length).fold(0.0, f32::max)
         };
         // Lockstep, as the viewport does it.
         let run = |a: &mut Simulation, b: &mut Simulation, steps: u32| {
@@ -1930,6 +1936,78 @@ mod gpu_tests {
         assert_ne!(before, read_back(&a, a.cur), "the snakes stopped moving");
         let scent: f32 = read_back(&b, b.cur).chunks(4).map(|c| c[0]).sum();
         assert!(scent > 0.0, "the scent layer never picked up the snakes");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn slither_does_not_lose_its_longest_snake_over_a_long_run() {
+        let _gpu = gpu_lock();
+        let Some(ctx) = context() else { return };
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "slither").unwrap());
+        let scent = p.layer_b.clone().expect("slither carries its scent layer");
+        // The preset as shipped: spawning and food on.
+        let build = |preset: &crate::preset::Preset| {
+            let (editor, config, _, toml_params) = crate::app::state::preset_to_state(preset);
+            let built = crate::app::state::build_shaders(&editor).unwrap();
+            let values = crate::app::state::resolve_values(&built.specs, &toml_params, &Default::default());
+            let mut sim = Simulation::new(
+                ctx.clone(),
+                SimConfig { mode: Mode::TwoD, width: 256, height: 256, init: config.init, seed: config.seed },
+            );
+            sim.disable_history();
+            sim.set_pipelines(&built.rule, &built.render, &built.post, built.seed.as_ref()).unwrap();
+            sim.set_params(pack_params(&built.specs, &values));
+            sim
+        };
+        let mut a = build(&p);
+        let mut b = build(&scent);
+        let mirror_a = a.create_mirror_texture();
+        let mirror_b = b.create_mirror_texture();
+        a.set_other(Some(&mirror_b));
+        b.set_other(Some(&mirror_a));
+        let run = |a: &mut Simulation, b: &mut Simulation, steps: u32| {
+            let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut enc = ctx.device.create_command_encoder(&Default::default());
+            for _ in 0..steps {
+                a.mirror_into(&mut enc, &mirror_a);
+                b.mirror_into(&mut enc, &mirror_b);
+                b.step(&mut enc, 1);
+                a.step(&mut enc, 1);
+            }
+            ctx.queue.submit([enc.finish()]);
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            pollster::block_on(scope.pop())
+        };
+        // Cell layout, see presets/slither/rule.wgsl: kind and id in .r, stamp + 2048 * moves
+        // in .b, the tail's stamp in .a; length = moves - tail stamp + 1.
+        let kind = |c: &[f32]| ((c[0].round() as i32) % 32) / 8;
+        let id = |c: &[f32]| (c[0].round() as i32) / 32;
+        let length = |c: &[f32]| {
+            let moves = c[2].round() as i32 / 2048;
+            ((moves - c[3].round() as i32) % 2048 + 2048) % 2048 + 1
+        };
+        let heads = |sim: &Simulation| -> Vec<(i32, i32)> {
+            read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 2).map(|c| (id(c), length(c))).collect()
+        };
+        let mut previous: Option<(i32, i32)> = None;
+        let mut lost: Vec<(u32, i32, i32)> = Vec::new();
+        for round in 1..=40u32 {
+            assert!(run(&mut a, &mut b, 300).is_none(), "validation error while slithering");
+            let hs = heads(&a);
+            let longest = hs.iter().copied().max_by_key(|h| h.1);
+            if let Some((pid, plen)) = previous
+                && !hs.iter().any(|h| h.0 == pid)
+            {
+                lost.push((round * 300, pid, plen));
+            }
+            if let Some((lid, llen)) = longest {
+                println!("step {}: {} snakes, longest id {lid} length {llen}", round * 300, hs.len());
+            }
+            previous = longest;
+        }
+        println!("longest snakes that vanished (step, id, length): {lost:?}");
+        let big_losses: Vec<_> = lost.iter().filter(|(_, _, l)| *l >= 15).collect();
+        assert!(big_losses.is_empty(), "a long snake vanished: {big_losses:?}");
     }
 
     #[test]

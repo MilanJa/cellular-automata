@@ -8,18 +8,27 @@
 // @param scent_glow: f32 = 0.7 range 0.0 .. 1.0
 // @param scent_gain: f32 = 2.0 range 0.1 .. 10.0
 
-fn length_hue(len: f32) -> f32 {
-    return fract(0.55 + log2(max(len, 0.5)) * 0.12);
-}
-
-// .r packs kind * 8 + direction + 32 * id; .b packs stamp + 2048 * moves (see rule.wgsl).
+// .r packs kind * 8 + direction + 32 * id; .b packs stamp + 2048 * moves; .a is the tail's
+// stamp, so the length is moves - tail stamp + 1 and the index moves - stamp (see rule.wgsl).
 fn kind_of(c: vec4<f32>) -> i32 {
     return (i32(round(c.r)) % 32) / 8;
 }
 
-fn index_of(c: vec4<f32>) -> i32 {
+fn since(later: i32, earlier: i32) -> i32 {
+    return ((later - earlier) % 2048 + 2048) % 2048;
+}
+
+fn index_of(c: vec4<f32>) -> f32 {
     let b = i32(round(c.b));
-    return (b / 2048 - b % 2048 + 2048) % 2048;
+    return f32(since(b / 2048, b % 2048));
+}
+
+fn len_of(c: vec4<f32>) -> f32 {
+    return f32(since(i32(round(c.b)) / 2048, i32(round(c.a))) + 1);
+}
+
+fn length_hue(len: f32) -> f32 {
+    return fract(0.55 + log2(max(len, 0.5)) * 0.12);
 }
 
 fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> {
@@ -32,9 +41,9 @@ fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> {
     var colour = mix(vec3<f32>(0.02, 0.03, 0.05), scent * 0.8, presence * params.scent_glow);
     let k = kind_of(cell);
     if (k == 1) {
-        let hue = length_hue(cell.a);
-        let fade = 1.0 - 0.5 * clamp(f32(index_of(cell)) / max(cell.a, 1.0), 0.0, 1.0);
-        colour = hsv(hue, 0.75, 0.95 * fade);
+        let len = len_of(cell);
+        let fade = 1.0 - 0.5 * clamp(index_of(cell) / max(len, 1.0), 0.0, 1.0);
+        colour = hsv(length_hue(len), 0.75, 0.95 * fade);
     } else if (k == 2) {
         colour = params.head_colour;
     } else if (k == 3) {
