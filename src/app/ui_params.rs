@@ -113,6 +113,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.state.modified = true; // layer B is saved with the preset
         }
     });
+    // Layer B's own sliders (plain values: no modulation or MIDI for the second layer).
+    let mut b_changed = false;
+    if let Some(b) = app.layer_b.clone() {
+        let mut b = crate::util::lock(&b);
+        let specs = b.specs.clone();
+        if !specs.is_empty() {
+            egui::Grid::new("params-layer-b").num_columns(2).striped(true).show(ui, |ui| {
+                for spec in &specs {
+                    ui.label(&spec.name);
+                    if let Some(v) = b.values.get_mut(&spec.name) {
+                        b_changed |= param_widget(ui, spec, v);
+                    }
+                    ui.end_row();
+                }
+            });
+        }
+    }
+    if b_changed {
+        app.push_layer_b_params();
+    }
 }
 
 /// MIDI learn / binding controls at the top of a param's "~" menu. Returns true if a binding was

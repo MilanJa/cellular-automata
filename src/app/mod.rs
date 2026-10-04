@@ -809,8 +809,32 @@ impl App {
         a.set_other(Some(&mirror_b));
         b.set_other(Some(&mirror_a));
         drop(a);
-        self.layer_b = Some(Arc::new(Mutex::new(LayerB { sim: b, name: loaded.name, mirror_a, mirror_b })));
+        self.layer_b = Some(Arc::new(Mutex::new(LayerB {
+            sim: b,
+            name: loaded.name,
+            mirror_a,
+            mirror_b,
+            specs: loaded.specs,
+            values,
+        })));
         self.state.layer_b_preset = Some(preset);
+    }
+
+    /// A layer B slider moved: upload the values and record them in the layer B preset, so Save
+    /// and share links keep them.
+    pub(crate) fn push_layer_b_params(&mut self) {
+        let Some(b) = &self.layer_b else { return };
+        let mut b = lock(b);
+        let packed = pack_params(&b.specs, &b.values);
+        b.sim.set_params(packed);
+        if let Some(preset) = &mut self.state.layer_b_preset {
+            for spec in &b.specs {
+                if let Some(v) = b.values.get(&spec.name) {
+                    preset.meta.params.insert(spec.name.clone(), crate::preset::param_value_to_toml(v));
+                }
+            }
+        }
+        self.state.modified = true;
     }
 
     /// After layer A changed size or mode, rebuild layer B to match.

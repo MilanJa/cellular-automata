@@ -90,7 +90,8 @@ layer B's `.g` channel is high; load Gray-Scott as layer B to see it.
 
 Layer B is part of the scene: **Save** writes it as a `layer_b/` sub-folder of the preset (a
 `[layer_b]` table in bundles and share links), loading a preset brings its layer B back or clears
-the current one, and **Reset** restarts both layers together.
+the current one, and **Reset** restarts both layers together. Layer B's own `@param` sliders
+appear under the Layer B picker, and their values are saved with it.
 
 ## Crossfading two rules
 
@@ -181,7 +182,9 @@ still (cells that have not changed for a while flip, so it never settles into st
 Slither, a two-layer automaton of snakes that hunt each other: layer A is the snakes as linked
 chains of cells, layer B the scent they steer by, and a longer snake eats a shorter one it
 runs into; long snakes grow flesh around their spine that blocks smaller snakes and that only a
-clearly longer one can plough through.
+clearly longer one can plough through. Slither Garden adds a Life-like garden that the snakes sow in their wake (what is
+sown and which rule grows are layer B's sliders): it damps the scent so thickets hide prey, its
+stable structures ripen into food, and snakes can graze on it or be walled in by it.
 
 ## Sharing a scene
 

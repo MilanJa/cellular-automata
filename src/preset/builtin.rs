@@ -56,7 +56,7 @@ macro_rules! embedded {
 /// Ready-to-run examples, listed first in the preset dropdown. A `static` (not a `const`) so
 /// the cached names live in one place. New entries go at the end: tests and the default preset
 /// refer to the earlier ones by index.
-pub static BUILTINS: [Builtin; 12] = [
+pub static BUILTINS: [Builtin; 13] = [
     embedded!("rule30", "rule30"),
     embedded!("rule110", "rule110"),
     embedded!("life", "life"),
@@ -69,10 +69,14 @@ pub static BUILTINS: [Builtin; 12] = [
     embedded!("gray_scott_discs", "gray_scott_discs", seed),
     embedded!("restless_life", "restless_life"),
     embedded!("slither", "slither", seed; layer_b = Some(&SLITHER_SCENT)),
+    embedded!("slither_garden", "slither_garden", seed; layer_b = Some(&SLITHER_GARDEN_B)),
 ];
 
 /// Slither's layer B: the scent field its snakes hunt by.
 static SLITHER_SCENT: Builtin = embedded!("slither_scent", "slither/layer_b");
+
+/// Slither Garden's layer B: the scent plus the Life-like garden sown in the snakes' wake.
+static SLITHER_GARDEN_B: Builtin = embedded!("slither_garden_b", "slither_garden/layer_b");
 
 /// Commented starting points for new work, offered by the "New" menu.
 pub static TEMPLATES: [Builtin; 9] = [
@@ -173,11 +177,11 @@ mod tests {
 
     #[test]
     fn builtins_have_unique_ids() {
-        assert_eq!(BUILTINS.len(), 12);
+        assert_eq!(BUILTINS.len(), 13);
         let mut ids: Vec<_> = BUILTINS.iter().map(|b| b.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 12);
+        assert_eq!(ids.len(), 13);
     }
 
     #[test]

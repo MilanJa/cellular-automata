@@ -18,6 +18,9 @@ pub struct LayerB {
     pub mirror_a: eframe::wgpu::Texture,
     /// B's state mirrored for A to read.
     pub mirror_b: eframe::wgpu::Texture,
+    /// Layer B's own sliders and their current values, shown in the Layer B section.
+    pub specs: Vec<crate::shader::params::ParamSpec>,
+    pub values: std::collections::BTreeMap<String, crate::shader::params::ParamValue>,
 }
 
 /// Largest `grid_aspect` rectangle centred inside a `viewport_w x viewport_h` box.

@@ -2014,6 +2014,66 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "needs a GPU"]
+    fn slither_garden_grows_in_the_snakes_wake() {
+        let _gpu = gpu_lock();
+        let Some(ctx) = context() else { return };
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "slither_garden").unwrap());
+        let garden = p.layer_b.clone().expect("the garden is layer B");
+        let build = |preset: &crate::preset::Preset| {
+            let (editor, config, _, toml_params) = crate::app::state::preset_to_state(preset);
+            let built = crate::app::state::build_shaders(&editor).unwrap();
+            let values = crate::app::state::resolve_values(&built.specs, &toml_params, &Default::default());
+            let mut sim = Simulation::new(
+                ctx.clone(),
+                SimConfig { mode: Mode::TwoD, width: 128, height: 128, init: config.init, seed: config.seed },
+            );
+            sim.disable_history();
+            sim.set_pipelines(&built.rule, &built.render, &built.post, built.seed.as_ref()).unwrap();
+            sim.set_params(pack_params(&built.specs, &values));
+            sim
+        };
+        let mut a = build(&p);
+        let mut b = build(&garden);
+        let mirror_a = a.create_mirror_texture();
+        let mirror_b = b.create_mirror_texture();
+        a.set_other(Some(&mirror_b));
+        b.set_other(Some(&mirror_a));
+        let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut enc = ctx.device.create_command_encoder(&Default::default());
+        for _ in 0..600 {
+            a.mirror_into(&mut enc, &mirror_a);
+            b.mirror_into(&mut enc, &mirror_b);
+            b.step(&mut enc, 1);
+            a.step(&mut enc, 1);
+        }
+        ctx.queue.submit([enc.finish()]);
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        assert!(pollster::block_on(scope.pop()).is_none(), "validation error while gardening");
+        let kind = |c: &[f32]| ((c[0].round() as i32) % 64) / 8;
+        let snakes = read_back(&a, a.cur).chunks(4).filter(|c| kind(c) == 2).count();
+        assert!(snakes >= 1, "every snake died");
+        let garden_state = read_back(&b, b.cur);
+        let living = garden_state.chunks(4).filter(|c| c[2] > 0.5).count();
+        let oldest = garden_state.chunks(4).map(|c| c[3]).fold(0.0, f32::max);
+        println!("{snakes} snakes, {living} living garden cells, oldest {oldest:.0} steps");
+        assert!(living > 20, "the snakes' trails should have sown a garden, got {living} cells");
+        assert!(oldest > 30.0, "garden cells should persist and age, oldest only {oldest:.0} steps");
+        // A picture of the scene through layer A's render (which draws the garden from layer B),
+        // for looking at: written to the temp directory, path printed with --nocapture.
+        a.start_export(3, "slither_garden".into()).unwrap();
+        let image = loop {
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            if let Some(result) = a.poll_export() {
+                break result.unwrap();
+            }
+        };
+        let path = std::env::temp_dir().join("slither_garden.png");
+        std::fs::write(&path, image.to_png().unwrap()).unwrap();
+        println!("wrote {}", path.display());
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
     fn reconfigure_clamps_and_resizes() {
         let _gpu = gpu_lock();
         let Some(mut sim) = sim_with(config(Mode::TwoD, 8, 8)) else { return };
