@@ -12,7 +12,7 @@
 // into .r, the length is the head's move count (.b / 2048) minus the tail's stamp (.a) plus one;
 // food counts as one half.
 fn snake_length(c: vec4<f32>) -> f32 {
-    let kind = (i32(round(c.r)) % 32) / 8;
+    let kind = (i32(round(c.r)) % 64) / 8;
     if (kind == 3) {
         return 0.5;
     }

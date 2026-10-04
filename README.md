@@ -180,7 +180,8 @@ Acorn and Gray-Scott Discs, Restless Life, which is Life with a built-in dislike
 still (cells that have not changed for a while flip, so it never settles into still lifes), and
 Slither, a two-layer automaton of snakes that hunt each other: layer A is the snakes as linked
 chains of cells, layer B the scent they steer by, and a longer snake eats a shorter one it
-runs into.
+runs into; long snakes grow flesh around their spine that blocks smaller snakes and that only a
+clearly longer one can plough through.
 
 ## Sharing a scene
 

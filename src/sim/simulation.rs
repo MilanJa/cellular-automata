@@ -1871,8 +1871,8 @@ mod gpu_tests {
         let mirror_b = b.create_mirror_texture();
         a.set_other(Some(&mirror_b));
         b.set_other(Some(&mirror_a));
-        // `.r` packs kind * 8 + direction + 32 * id (see presets/slither/rule.wgsl).
-        let kind = |c: &[f32]| ((c[0].round() as i32) % 32) / 8;
+        // `.r` packs kind * 8 + direction + 64 * id (see presets/slither/rule.wgsl).
+        let kind = |c: &[f32]| ((c[0].round() as i32) % 64) / 8;
         let snake_cells = |sim: &Simulation| {
             let data = read_back(sim, sim.cur);
             let heads = data.chunks(4).filter(|c| kind(c) == 2).count();
@@ -1982,8 +1982,8 @@ mod gpu_tests {
         };
         // Cell layout, see presets/slither/rule.wgsl: kind and id in .r, stamp + 2048 * moves
         // in .b, the tail's stamp in .a; length = moves - tail stamp + 1.
-        let kind = |c: &[f32]| ((c[0].round() as i32) % 32) / 8;
-        let id = |c: &[f32]| (c[0].round() as i32) / 32;
+        let kind = |c: &[f32]| ((c[0].round() as i32) % 64) / 8;
+        let id = |c: &[f32]| (c[0].round() as i32) / 64;
         let length = |c: &[f32]| {
             let moves = c[2].round() as i32 / 2048;
             ((moves - c[3].round() as i32) % 2048 + 2048) % 2048 + 1

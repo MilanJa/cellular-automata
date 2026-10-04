@@ -12,7 +12,7 @@ fn seed(pos: vec2<u32>) -> vec4<f32> {
         let heading = i32(rand(pos, 3u) * 8.0) % 8;
         let growth = 1 + i32(rand(pos, 5u) * 2.0 * f32(params.spawn_length));
         let id = 1 + i32(rand(pos, 11u) * 4094.0);
-        return vec4<f32>(f32(2 * 8 + heading + 32 * id), f32(growth), 0.0, 0.0);
+        return vec4<f32>(f32(2 * 8 + heading + 64 * id), f32(growth), 0.0, 0.0);
     }
     if (rand(pos, 9u) < params.food_start) {
         return vec4<f32>(f32(3 * 8), 0.0, 0.0, 0.0); // kind 3 = food
