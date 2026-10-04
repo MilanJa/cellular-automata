@@ -14,6 +14,10 @@
 // Food is a fourth kind of cell: it never moves, smells like a very small snake so every head
 // is drawn to it, and feeds one cell of growth to the head that moves onto it.
 //
+// Metabolism: a snake of length L loses a cell every (32 * metabolism / L) moves, so a snake
+// of 32 cells burns one per `metabolism` moves, a giant burns much faster and a small snake
+// hardly at all. A snake has to keep eating to stay big; 0 switches it off.
+//
 // Cell layout:  .r = kind * 8 + direction + 32 * id   (kind 0 empty, 1 body, 2 head, 3 food;
 //                    the id tells a snake its own cells from everyone else's)
 //               .g = growth this cell will spend once it is the tail: the size of the meal
@@ -36,6 +40,7 @@
 // @param spawn: f32 = 0.000002 range 0.0 .. 0.00005
 // @param spawn_length: i32 = 6 range 1 .. 30
 // @param food: f32 = 0.00002 range 0.0 .. 0.0005
+// @param metabolism: i32 = 40 range 0 .. 120
 
 const EMPTY = 0;
 const BODY = 1;
@@ -325,6 +330,7 @@ fn rule(pos: vec2<u32>) -> vec4<f32> {
     // twice as fast.
     var has_tail = false;
     var behind = p;
+    var behind_growth = 0;
     var tail_stamp = stamp;
     for (var i = 0; i < 8; i++) {
         let n = p + DIRS[i];
@@ -332,16 +338,28 @@ fn rule(pos: vec2<u32>) -> vec4<f32> {
         if (kind_of(nc) == BODY && id_of(nc) == my_id && all(n + DIRS[dir_of(nc)] == p)) {
             has_tail = true;
             behind = n;
+            behind_growth = growth_of(nc);
             tail_stamp = tail_stamp_of(nc);
         }
     }
+    var behind_is_tail = has_tail;
     if (has_tail) {
         for (var i = 0; i < 8; i++) {
             let m = behind + DIRS[i];
             let mc = cell(m.x, m.y);
             if (kind_of(mc) == BODY && id_of(mc) == my_id && all(m + DIRS[dir_of(mc)] == behind)) {
+                behind_is_tail = false;
                 tail_stamp = tail_stamp_of(mc);
             }
+        }
+    }
+    // Metabolism: on a burn tick the second-to-last cell leaves together with the tail (which
+    // only leaves when it has no growth to spend, so no gap can open).
+    if (advancing && behind_is_tail && behind_growth == 0 && params.metabolism > 0) {
+        let period = max(1, (32 * params.metabolism) / max(i32(len_of(c)), 1));
+        let move_index = i32(globals.frame / u32(max(params.every, 1)));
+        if (move_index % period == 0) {
+            return empty();
         }
     }
     // The latest move count travels down the chain; reading two segments ahead carries it

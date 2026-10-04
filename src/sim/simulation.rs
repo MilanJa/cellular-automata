@@ -1854,6 +1854,8 @@ mod gpu_tests {
             // eating, or gained from the food the seed scattered.
             values.insert("spawn".into(), crate::shader::params::ParamValue::F32(0.0));
             values.insert("food".into(), crate::shader::params::ParamValue::F32(0.0));
+            // Nor any metabolism: this test is about cells only ever moving between snakes.
+            values.insert("metabolism".into(), crate::shader::params::ParamValue::I32(0));
             let mut sim = Simulation::new(
                 ctx.clone(),
                 SimConfig { mode: Mode::TwoD, width: 256, height: 256, init: config.init, seed: config.seed },
