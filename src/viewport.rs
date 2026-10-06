@@ -6,8 +6,9 @@ use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, ScreenDescriptor
 use eframe::wgpu;
 use egui::PaintCallbackInfo;
 
-use crate::sim::paint::Stroke;
 use crate::sim::Simulation;
+use crate::sim::paint::Stroke;
+use crate::util::lock;
 
 /// A second automaton that layer A can read through `other()`, and that reads layer A back.
 pub struct LayerB {
@@ -17,6 +18,9 @@ pub struct LayerB {
     pub mirror_a: eframe::wgpu::Texture,
     /// B's state mirrored for A to read.
     pub mirror_b: eframe::wgpu::Texture,
+    /// Layer B's own sliders and their current values, shown in the Layer B section.
+    pub specs: Vec<crate::shader::params::ParamSpec>,
+    pub values: std::collections::BTreeMap<String, crate::shader::params::ParamValue>,
 }
 
 /// Largest `grid_aspect` rectangle centred inside a `viewport_w x viewport_h` box.
@@ -55,7 +59,7 @@ impl CallbackTrait for ViewportCallback {
         egui_encoder: &mut wgpu::CommandEncoder,
         _resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let mut sim = self.sim.lock().unwrap();
+        let mut sim = lock(&self.sim);
         sim.set_time(self.time);
         if let Some(index) = self.restore {
             sim.restore_snapshot(egui_encoder, index);
@@ -63,15 +67,23 @@ impl CallbackTrait for ViewportCallback {
         if !self.strokes.is_empty() {
             sim.paint(egui_encoder, &self.strokes);
         }
-        if let Some(b) = &self.layer_b {
-            // Both layers see each other's state from before this frame's steps.
-            let mut b = b.lock().unwrap();
-            sim.mirror_into(egui_encoder, &b.mirror_a);
-            b.sim.mirror_into(egui_encoder, &b.mirror_b);
-            b.sim.set_time(self.time);
-            b.sim.step(egui_encoder, self.steps);
+        match &self.layer_b {
+            Some(b) => {
+                // The layers are stepped in lockstep: before every step each gets a copy of the
+                // other's state, so `other()` always reads the previous generation, however
+                // many steps a frame runs. (A single zero-step pass still refreshes the mirrors
+                // and the globals.)
+                let mut b = lock(b);
+                b.sim.set_time(self.time);
+                for _ in 0..self.steps.max(1) {
+                    sim.mirror_into(egui_encoder, &b.mirror_a);
+                    b.sim.mirror_into(egui_encoder, &b.mirror_b);
+                    b.sim.step(egui_encoder, self.steps.min(1));
+                    sim.step(egui_encoder, self.steps.min(1));
+                }
+            }
+            None => sim.step(egui_encoder, self.steps),
         }
-        sim.step(egui_encoder, self.steps);
         if self.steps > 0 || !self.strokes.is_empty() {
             sim.collect_stats(egui_encoder);
         }
@@ -80,19 +92,14 @@ impl CallbackTrait for ViewportCallback {
         Vec::new()
     }
 
-    fn paint(
-        &self,
-        info: PaintCallbackInfo,
-        pass: &mut wgpu::RenderPass<'static>,
-        _resources: &CallbackResources,
-    ) {
+    fn paint(&self, info: PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, _resources: &CallbackResources) {
         let vp = info.viewport_in_pixels();
         let (x, y, w, h) = letterbox(vp.width_px as f32, vp.height_px as f32, self.grid_aspect);
         if w < 1.0 || h < 1.0 {
             return;
         }
         pass.set_viewport(vp.left_px as f32 + x, vp.top_px as f32 + y, w, h, 0.0, 1.0);
-        let sim = self.sim.lock().unwrap();
+        let sim = lock(&self.sim);
         sim.draw(pass);
     }
 }
@@ -112,7 +119,7 @@ pub fn show_viewport(
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     ui.painter().rect_filled(rect, 0.0, crate::app::theme::VIEWPORT_BG);
     let grid_aspect = {
-        let s = sim.lock().unwrap();
+        let s = lock(sim);
         let c = s.config();
         c.width as f32 / c.height.max(1) as f32
     };

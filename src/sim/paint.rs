@@ -50,13 +50,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// Maps a pointer position (screen units) inside the viewport `rect = (x, y, w, h)` to a grid
 /// cell, or `None` when it falls in the letterbox bars.
-pub fn pointer_to_cell(
-    px: f32,
-    py: f32,
-    rect: (f32, f32, f32, f32),
-    grid_w: u32,
-    grid_h: u32,
-) -> Option<(i32, i32)> {
+pub fn pointer_to_cell(px: f32, py: f32, rect: (f32, f32, f32, f32), grid_w: u32, grid_h: u32) -> Option<(i32, i32)> {
     let (rx, ry, rw, rh) = rect;
     let (lx, ly, lw, lh) = letterbox(rw, rh, grid_w as f32 / grid_h.max(1) as f32);
     let u = (px - rx - lx) / lw;

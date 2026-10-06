@@ -16,6 +16,9 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 pub use web::*;
 
+/// A file dropped on the window (`name`, bytes), or a message saying why it could not be read.
+pub type DroppedFile = Result<(String, Vec<u8>), String>;
+
 /// Where a saved preset lives: a folder on disk or a `localStorage` key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SavedLocation {
@@ -62,15 +65,13 @@ fn percent_decode(s: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'+' => out.push(b' '),
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 2;
-                    }
-                    Err(_) => out.push(b'%'),
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(b) => {
+                    out.push(b);
+                    i += 2;
                 }
-            }
+                Err(_) => out.push(b'%'),
+            },
             b => out.push(b),
         }
         i += 1;

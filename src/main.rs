@@ -1,32 +1,37 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     env_logger::init();
-    // Optional: `--preset <builtin-id | folder>` selects the preset loaded at startup.
+    // Optional: `--preset <builtin-id | folder>` selects the preset loaded at startup, and
+    // `--size WxH` the initial window size (handy for checking the compact layout).
     let mut args = std::env::args().skip(1);
     let mut start_preset: Option<String> = None;
+    let mut size = [1400.0, 900.0];
     while let Some(a) = args.next() {
         match a.as_str() {
             "--preset" | "-p" => start_preset = args.next(),
+            "--size" => {
+                if let Some((w, h)) = args.next().as_deref().and_then(|s| s.split_once('x'))
+                    && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
+                {
+                    size = [w.max(200.0), h.max(200.0)];
+                }
+            }
             "--help" | "-h" => {
-                println!("usage: cellular-automata [--preset <builtin-id | folder>]");
+                println!("usage: cellular-automata [--preset <builtin-id | folder>] [--size WxH]");
                 return Ok(());
             }
             _ => {}
         }
     }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Cellular Automata Shader IDE")
-            .with_inner_size([1400.0, 900.0]),
+        viewport: egui::ViewportBuilder::default().with_title("Cellular Automata Shader IDE").with_inner_size(size),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(
         "cellular-automata",
         options,
-        Box::new(move |cc| {
-            Ok(Box::new(cellular_automata::app::App::with_preset(cc, start_preset.as_deref())))
-        }),
+        Box::new(move |cc| Ok(Box::new(cellular_automata::app::App::with_preset(cc, start_preset.as_deref())))),
     )
 }
 
@@ -51,9 +56,7 @@ fn main() {
     };
 
     wasm_bindgen_futures::spawn_local(async move {
-        let document = web_sys::window()
-            .and_then(|w| w.document())
-            .expect("no document");
+        let document = web_sys::window().and_then(|w| w.document()).expect("no document");
         let canvas = document
             .get_element_by_id("ca_canvas")
             .expect("missing #ca_canvas")
@@ -64,7 +67,7 @@ fn main() {
         let start = match platform::startup_share_code()
             .and_then(|code| cellular_automata::preset::share::decode_share_code(&code).ok())
         {
-            Some(preset) => Start::Shared(preset),
+            Some(preset) => Start::Shared(Box::new(preset)),
             None => platform::startup_preset_from_url().map_or(Start::Default, Start::Named),
         };
         let result = eframe::WebRunner::new()

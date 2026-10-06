@@ -1,25 +1,56 @@
+use super::App;
 use super::state::PresetSource;
 use super::theme;
-use super::App;
 use crate::platform;
-use crate::preset::builtin::{load_builtin, BUILTINS, TEMPLATES};
 use crate::preset::Preset;
+use crate::preset::builtin::{BUILTINS, TEMPLATES, TUTORIAL, load_builtin};
+use crate::util::lock;
 
-pub const SAVE_SHORTCUT: egui::KeyboardShortcut =
-    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+pub const SAVE_SHORTCUT: egui::KeyboardShortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
 
-/// Menu bar: File / Image / View menus, the preset picker, transport controls and the status
-/// readout pinned to the right.
-pub fn show(app: &mut App, ui: &mut egui::Ui) {
+/// Menu bar: File / Image / View menus, the preset picker, transport controls with the grid
+/// settings, the microphone and MIDI toggles, and the status readout pinned to the right.
+/// `compact` (narrow screens) splits it over two rows, shortens the labels, drops the rate
+/// readout and adds the toggle for the editors panel.
+pub fn show(app: &mut App, ui: &mut egui::Ui, compact: bool) {
+    if compact {
+        egui::containers::menu::MenuBar::new().ui(ui, |ui| {
+            file_menu(app, ui);
+            image_menu(app, ui);
+            view_menu(app, ui);
+            let code = egui::RichText::new("</> Code");
+            let code = if app.code_panel_open { code.color(theme::ACCENT).strong() } else { code };
+            if ui
+                .selectable_label(app.code_panel_open, code)
+                .on_hover_text("Show or hide the shader editors and sliders")
+                .clicked()
+            {
+                app.code_panel_open = !app.code_panel_open;
+            }
+            ui.separator();
+            preset_picker(app, ui, 130.0);
+        });
+        ui.horizontal_wrapped(|ui| {
+            transport(app, ui, true);
+            ui.separator();
+            super::ui_inputs::audio(app, ui);
+            super::ui_inputs::midi(app, ui);
+            status(app, ui, true);
+        });
+        return;
+    }
     egui::containers::menu::MenuBar::new().ui(ui, |ui| {
         file_menu(app, ui);
         image_menu(app, ui);
         view_menu(app, ui);
         ui.separator();
-        preset_picker(app, ui);
+        preset_picker(app, ui, 240.0);
         ui.separator();
-        transport(app, ui);
-        status(app, ui);
+        transport(app, ui, false);
+        ui.separator();
+        super::ui_inputs::audio(app, ui);
+        super::ui_inputs::midi(app, ui);
+        status(app, ui, false);
     });
 }
 
@@ -29,8 +60,16 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
         ui.menu_button("New from template", |ui| {
             ui.label(egui::RichText::new("Commented starting points").small().weak());
             for (i, t) in TEMPLATES.iter().enumerate() {
-                if ui.button(load_builtin(t).meta.name).clicked() {
+                if ui.button(t.name()).clicked() {
                     app.load_template(i);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            ui.label(egui::RichText::new("Tutorial (docs/tutorial in the repository)").small().weak());
+            for (i, t) in TUTORIAL.iter().enumerate() {
+                if ui.button(t.name()).clicked() {
+                    app.load_tutorial(i);
                     ui.close();
                 }
             }
@@ -48,6 +87,14 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
         if ui.button("Save as…").clicked() {
             app.save_as();
         }
+        let is_saved = matches!(app.state.source, PresetSource::Saved(_));
+        if ui
+            .add_enabled(is_saved, egui::Button::new("Delete saved preset…"))
+            .on_hover_text("Remove this preset from where it is saved; the scene stays open")
+            .clicked()
+        {
+            app.delete_saved_preset();
+        }
         ui.separator();
         if ui.button("Export bundle…").on_hover_text("Download / write a single-file preset bundle").clicked() {
             app.export();
@@ -55,7 +102,8 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
         if ui.button("Import bundle…").on_hover_text("Load a preset bundle file").clicked() {
             app.import();
         }
-        if ui.button("Copy share link").on_hover_text("A link that opens this exact scene in the web version").clicked() {
+        if ui.button("Copy share link").on_hover_text("A link that opens this exact scene in the web version").clicked()
+        {
             app.share(&ctx);
         }
         if !platform::is_web() {
@@ -70,7 +118,9 @@ fn file_menu(app: &mut App, ui: &mut egui::Ui) {
 fn image_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button("Image", |ui| {
         ui.label(egui::RichText::new("Save the grid as a PNG").small().weak());
-        for (s, label) in [(1u32, "Export PNG, 1 px per cell"), (2, "Export PNG, 2 px per cell"), (4, "Export PNG, 4 px per cell")] {
+        for (s, label) in
+            [(1u32, "Export PNG, 1 px per cell"), (2, "Export PNG, 2 px per cell"), (4, "Export PNG, 4 px per cell")]
+        {
             if ui.button(label).clicked() {
                 app.export_image(s);
             }
@@ -97,21 +147,16 @@ fn view_menu(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-fn preset_picker(app: &mut App, ui: &mut egui::Ui) {
-    let label = if app.state.modified {
-        format!("{} *", app.state.preset_name)
-    } else {
-        app.state.preset_name.clone()
-    };
+fn preset_picker(app: &mut App, ui: &mut egui::Ui, width: f32) {
+    let label = if app.state.modified { format!("{} *", app.state.preset_name) } else { app.state.preset_name.clone() };
     let mut to_load: Option<(Preset, PresetSource)> = None;
     let mut to_load_saved: Option<platform::SavedLocation> = None;
-    egui::ComboBox::from_id_salt("preset").selected_text(label).width(240.0).show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt("preset").selected_text(label).width(width).show_ui(ui, |ui| {
         ui.label(egui::RichText::new("Built-in").small().weak());
         for (i, b) in BUILTINS.iter().enumerate() {
-            let p = load_builtin(b);
             let selected = app.state.source == PresetSource::Builtin(i);
-            if ui.selectable_label(selected, &p.meta.name).clicked() {
-                to_load = Some((p, PresetSource::Builtin(i)));
+            if ui.selectable_label(selected, b.name()).clicked() {
+                to_load = Some((load_builtin(b), PresetSource::Builtin(i)));
             }
         }
         if !app.state.saved_presets.is_empty() {
@@ -133,36 +178,47 @@ fn preset_picker(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn transport(app: &mut App, ui: &mut egui::Ui) {
+fn transport(app: &mut App, ui: &mut egui::Ui, compact: bool) {
+    let (pause, play, step, reset) =
+        if compact { ("⏸", "▶", "⏭", "↺") } else { ("⏸ Pause", "▶ Play", "⏭ Step", "↺ Reset") };
     let play = if app.state.playing {
-        egui::Button::new("⏸ Pause")
+        egui::Button::new(pause)
     } else {
-        egui::Button::new(egui::RichText::new("▶ Play").color(theme::ACCENT).strong())
+        egui::Button::new(egui::RichText::new(play).color(theme::ACCENT).strong())
     };
-    if ui.add(play).on_hover_text("Space").clicked() {
+    if ui.add(play).on_hover_text("Play / pause (Space)").clicked() {
         app.state.playing = !app.state.playing;
     }
-    if ui.add_enabled(!app.state.playing, egui::Button::new("⏭ Step")).clicked() {
+    if ui.add_enabled(!app.state.playing, egui::Button::new(step)).on_hover_text("One step").clicked() {
         app.state.step_once = true;
     }
-    ui.label("steps/frame");
-    if ui.add(egui::DragValue::new(&mut app.state.steps_per_frame).range(1..=256)).changed() {
+    if !compact {
+        ui.label("steps/frame");
+    }
+    if ui
+        .add(egui::DragValue::new(&mut app.state.steps_per_frame).range(1..=256))
+        .on_hover_text("Simulation steps per rendered frame")
+        .changed()
+    {
         app.state.modified = true;
     }
-    if ui.button("↺ Reset").on_hover_text("Apply grid settings and re-initialise").clicked() {
+    if ui.button(reset).on_hover_text("Apply grid settings and re-initialise").clicked() {
         app.apply_settings_and_reset();
     }
+    super::ui_inputs::grid(app, ui);
 }
 
-fn status(app: &mut App, ui: &mut egui::Ui) {
-    let frame = app.sim.lock().unwrap().frame();
+fn status(app: &mut App, ui: &mut egui::Ui, compact: bool) {
+    let frame = lock(&app.sim).frame();
     let steps_per_sec = app.rate.update(web_time::Instant::now(), frame);
     let dt = ui.input(|i| i.stable_dt).max(1e-6);
     // Status lives at the right edge, so the controls keep a stable position.
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(
-            egui::RichText::new(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt)).weak(),
-        );
+        if !compact {
+            ui.label(
+                egui::RichText::new(format!("step {frame}   {steps_per_sec:.0} steps/s   {:.0} fps", 1.0 / dt)).weak(),
+            );
+        }
         if let Some((done, total)) = app.recording_progress() {
             if ui.small_button("Stop").clicked() {
                 app.stop_recording();
@@ -187,10 +243,7 @@ pub fn save_dialog(app: &mut App, ctx: &egui::Context) {
             ui.label("Name");
             let resp = ui.text_edit_singleline(&mut name);
             if dialog.confirm_overwrite {
-                ui.colored_label(
-                    theme::WARN,
-                    "A preset with this name already exists. Save again to overwrite it.",
-                );
+                ui.colored_label(theme::WARN, "A preset with this name already exists. Save again to overwrite it.");
             }
             ui.horizontal(|ui| {
                 let label = if dialog.confirm_overwrite { "Overwrite" } else { "Save" };
@@ -226,7 +279,7 @@ pub fn save_dialog(app: &mut App, ctx: &egui::Context) {
 pub fn stats_readout(app: &App, ui: &mut egui::Ui) {
     let Some(last) = app.state.stats.back() else { return };
     let cells = {
-        let c = app.state.pending.clone();
+        let c = &app.state.applied;
         (c.width as f32 * c.height as f32).max(1.0)
     };
     ui.separator();
@@ -267,11 +320,13 @@ pub fn stats_readout(app: &App, ui: &mut egui::Ui) {
 /// Rewind strip under the viewport: snapshot slider, step label and snapshot interval.
 pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
     let (len, cap, interval, selected_meta) = {
-        let sim = app.sim.lock().unwrap();
+        let sim = lock(&app.sim);
         let len = sim.history_len();
         let idx = app.scrub.unwrap_or(len.saturating_sub(1)).min(len.saturating_sub(1));
         (len, sim.history_capacity(), sim.snapshot_interval(), sim.history_meta(idx))
     };
+    // On a narrow strip the snapshot count and the "every" label go, so the slider keeps room.
+    let compact = ui.available_width() < 560.0;
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("⏪").weak());
         if len < 2 {
@@ -281,27 +336,33 @@ pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
             let newest = len - 1;
             let mut pos = if app.state.playing { newest } else { app.scrub.unwrap_or(newest).min(newest) };
             let slider = egui::Slider::new(&mut pos, 0..=newest).show_value(false);
-            let resp = ui.add_sized([ui.available_width() - 330.0, 18.0], slider);
+            // Leave room for the labels on the right; never collapse below a usable width.
+            let reserved = if compact { 200.0 } else { 330.0 };
+            let resp = ui.add_sized([(ui.available_width() - reserved).max(80.0), 18.0], slider);
             if resp.changed() {
                 app.scrub_to(pos);
             }
             if let Some(m) = selected_meta {
                 ui.label(format!("step {}", m.step));
             }
-            ui.label(egui::RichText::new(format!("{len}/{cap} snapshots")).weak());
+            if !compact {
+                ui.label(egui::RichText::new(format!("{len}/{cap} snapshots")).weak());
+            }
         }
-        ui.label(egui::RichText::new("every").weak());
+        if !compact {
+            ui.label(egui::RichText::new("every").weak());
+        }
         let mut iv = interval;
-        egui::ComboBox::from_id_salt("snapshot-interval")
-            .selected_text(format!("{iv} steps"))
-            .width(90.0)
-            .show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("snapshot-interval").selected_text(format!("{iv} steps")).width(90.0).show_ui(
+            ui,
+            |ui| {
                 for v in [1u32, 2, 5, 10, 30, 100] {
                     ui.selectable_value(&mut iv, v, format!("{v} steps"));
                 }
-            });
+            },
+        );
         if iv != interval {
-            app.sim.lock().unwrap().set_snapshot_interval(iv);
+            lock(&app.sim).set_snapshot_interval(iv);
         }
     });
     if app.state.playing {
@@ -313,7 +374,7 @@ pub fn timeline(app: &mut App, ui: &mut egui::Ui) {
 pub fn record_dialog(app: &mut App, ctx: &egui::Context) {
     let Some(mut settings) = app.record_dialog else { return };
     let (w, h) = {
-        let sim = app.sim.lock().unwrap();
+        let sim = lock(&app.sim);
         let c = sim.config();
         (c.width, c.height)
     };
@@ -338,7 +399,12 @@ pub fn record_dialog(app: &mut App, ctx: &egui::Context) {
                     }
                 });
                 ui.end_row();
-                let cap = crate::sim::record::max_frames(w * settings.scale, h * settings.scale, crate::sim::record::FRAME_BUDGET_BYTES).min(3600);
+                let cap = crate::sim::record::max_frames(
+                    w * settings.scale,
+                    h * settings.scale,
+                    crate::sim::record::FRAME_BUDGET_BYTES,
+                )
+                .min(3600);
                 settings.frames = settings.frames.clamp(1, cap);
                 ui.label("frames");
                 ui.add(egui::Slider::new(&mut settings.frames, 1..=cap).logarithmic(true));
@@ -347,8 +413,12 @@ pub fn record_dialog(app: &mut App, ctx: &egui::Context) {
                 ui.add(egui::Slider::new(&mut settings.fps, 1..=60));
                 ui.end_row();
                 ui.label("image size");
-                ui.label(format!("{} × {} px, {:.0} MB buffered", w * settings.scale, h * settings.scale,
-                    (w * settings.scale) as f64 * (h * settings.scale) as f64 * 4.0 * settings.frames as f64 / 1e6));
+                ui.label(format!(
+                    "{} × {} px, {:.0} MB buffered",
+                    w * settings.scale,
+                    h * settings.scale,
+                    (w * settings.scale) as f64 * (h * settings.scale) as f64 * 4.0 * settings.frames as f64 / 1e6
+                ));
                 ui.end_row();
             });
             ui.horizontal(|ui| {

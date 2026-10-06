@@ -24,8 +24,8 @@ pub struct AudioLevels {
 /// Magnitude spectrum (N/2 bins) of a real signal whose length is a power of two, via an
 /// iterative radix-2 FFT. No window is applied here.
 pub fn magnitudes(samples: &[f32]) -> Vec<f32> {
-    let n = samples.len().next_power_of_two().min(samples.len().max(1));
-    let n = if n.is_power_of_two() { n } else { 1 << (usize::BITS - 1 - n.leading_zeros()) };
+    // Largest power of two that fits in the input (1 for an empty slice).
+    let n = 1usize << (usize::BITS - 1 - samples.len().max(1).leading_zeros());
     let mut re: Vec<f32> = samples[..n].to_vec();
     let mut im: Vec<f32> = vec![0.0; n];
     // Bit-reversal permutation.

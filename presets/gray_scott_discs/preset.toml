@@ -1,0 +1,11 @@
+name = "Gray-Scott Discs"
+mode = "2d"
+width = 512
+height = 512
+steps_per_frame = 8
+seed = 3
+
+[init]
+kind = "code"
+
+[params]

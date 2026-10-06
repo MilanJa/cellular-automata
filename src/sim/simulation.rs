@@ -1,23 +1,27 @@
 //! GPU simulation: two ping-pong `rgba32float` textures, a compute pipeline built from the
-//! user's rule shader and a render pipeline built from the user's render shader.
+//! user's rule shader and a render pipeline built from the user's render shader. The fixed
+//! GPU objects every simulation on a device shares live in [`GpuContext`].
+
+use std::sync::{Arc, Mutex};
 
 use eframe::wgpu;
 use eframe::wgpu::util::DeviceExt;
 
 use crate::preset::{InitPattern, Mode};
-use crate::shader::assemble::{Assembled, BLIT_WGSL};
 use crate::shader::params::MAX_PARAMS;
-use crate::shader::validate::{validate, ShaderError, ShaderFile};
-use crate::sim::export::{clamp_scale, padded_bytes_per_row, to_rgba, unpad_rows, ExportedImage};
+use crate::shader::validate::{ShaderError, ShaderFile, Validated};
+use crate::sim::export::{ExportedImage, clamp_scale, padded_bytes_per_row, to_rgba, unpad_rows};
+use crate::sim::gpu::{GpuContext, SCENE_FORMAT, fullscreen_pipeline};
 use crate::sim::history::{
-    should_snapshot, snapshot_capacity, SnapshotMeta, SnapshotRing, DEFAULT_BUDGET_BYTES,
-    DEFAULT_INTERVAL, MAX_SNAPSHOTS,
+    DEFAULT_BUDGET_BYTES, DEFAULT_INTERVAL, MAX_SNAPSHOTS, SnapshotMeta, SnapshotRing, should_snapshot,
+    snapshot_capacity,
 };
 use crate::sim::init::generate_init;
-use crate::sim::paint::{brush_bbox, PaintUniform, Stroke, PAINT_WGSL};
-use crate::sim::stats::{StatsSample, STATS_WGSL};
-use crate::sim::row::{clamp_size, plan_row, RowPlan, WORKGROUP};
+use crate::sim::paint::{PaintUniform, Stroke, brush_bbox};
+use crate::sim::row::{RowPlan, WORKGROUP, clamp_size, plan_row};
+use crate::sim::stats::StatsSample;
 use crate::sim::uniforms::{Globals, ParamsData};
+use crate::util::lock;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimConfig {
@@ -54,15 +58,29 @@ struct SceneTargets {
     cur: usize,
 }
 
-/// Intermediate picture format: filterable, high range for bloom and feedback.
-pub const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The user-shader pipelines; always swapped in together so they agree on `Params`.
+struct Pipelines {
+    compute: wgpu::ComputePipeline,
+    render: wgpu::RenderPipeline,
+    post: wgpu::RenderPipeline,
+    /// The initial-state shader, when the preset has one; run by `reset` for a `Code` init.
+    seed: Option<wgpu::ComputePipeline>,
+}
+
+/// Browser only: pipelines built but not yet confirmed by the backend's asynchronous error
+/// scopes. They are installed once the scopes resolve clean, or discarded with the errors.
+#[cfg(target_arch = "wasm32")]
+struct PendingPipelines {
+    pipelines: Pipelines,
+    result: Arc<Mutex<Option<Vec<ShaderError>>>>,
+}
 
 /// One slot of the statistics readback pool.
 struct StatsSlot {
     buffer: wgpu::Buffer,
     state: StatsSlotState,
     step: u32,
-    mapped: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    mapped: Arc<Mutex<Option<bool>>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,323 +91,78 @@ enum StatsSlotState {
     Mapping,
 }
 
-pub struct Simulation {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    target_format: wgpu::TextureFormat,
-    config: SimConfig,
-    compute_layout: wgpu::BindGroupLayout,
-    render_layout: wgpu::BindGroupLayout,
-    paint_layout: wgpu::BindGroupLayout,
-    paint_pipeline: wgpu::ComputePipeline,
-    paint_buf: wgpu::Buffer,
-    stats_layout: wgpu::BindGroupLayout,
-    stats_pipeline: wgpu::ComputePipeline,
-    stats_buf: wgpu::Buffer,
-    stats_slots: Vec<StatsSlot>,
-    compute_pipeline_layout: wgpu::PipelineLayout,
-    render_pipeline_layout: wgpu::PipelineLayout,
-    globals_buf: wgpu::Buffer,
-    params_buf: wgpu::Buffer,
-    textures: Textures,
-    /// Index of the texture holding the current state.
-    cur: usize,
-    compute: Option<wgpu::ComputePipeline>,
-    render: Option<wgpu::RenderPipeline>,
-    post: Option<wgpu::RenderPipeline>,
-    post_layout: wgpu::BindGroupLayout,
-    post_pipeline_layout: wgpu::PipelineLayout,
-    blit_layout: wgpu::BindGroupLayout,
-    blit_pipeline: wgpu::RenderPipeline,
-    sampler: wgpu::Sampler,
-    /// Viewport-resolution scene and post targets; created on first frame, resized on demand.
-    scene: Option<SceneTargets>,
-    /// What `other()` reads: layer B's mirror, or a 1x1 zero texture.
-    other_view: wgpu::TextureView,
-    empty_other_view: wgpu::TextureView,
-    /// Rewind snapshots: one grid-sized texture per slot plus the ring that orders them.
-    history_tex: Vec<wgpu::Texture>,
-    history: SnapshotRing,
-    snapshot_interval: u32,
-    globals: Globals,
-    /// Set by wgpu's device-lost callback; drained by the app once per frame.
-    device_lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    export: Option<PendingExport>,
+/// Offscreen render targets and the readback buffer for image export, kept between exports of
+/// the same size so a recording does not allocate per frame.
+struct ExportTargets {
+    width: u32,
+    height: u32,
+    scene_view: wgpu::TextureView,
+    post_view: wgpu::TextureView,
+    final_tex: wgpu::Texture,
+    buffer: wgpu::Buffer,
+    padded_bpr: u32,
 }
 
 /// An offscreen render that has been submitted and whose readback buffer is being mapped.
 struct PendingExport {
-    buffer: wgpu::Buffer,
     width: u32,
     height: u32,
     padded_bpr: u32,
     filename: String,
     /// `Some(ok)` once the map callback ran.
-    mapped: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    mapped: Arc<Mutex<Option<bool>>>,
+}
+
+pub struct Simulation {
+    ctx: Arc<GpuContext>,
+    config: SimConfig,
+    paint_buf: wgpu::Buffer,
+    stats_buf: wgpu::Buffer,
+    stats_slots: Vec<StatsSlot>,
+    globals_buf: wgpu::Buffer,
+    params_buf: wgpu::Buffer,
+    textures: Textures,
+    /// Index of the texture holding the current state.
+    cur: usize,
+    pipelines: Option<Pipelines>,
+    #[cfg(target_arch = "wasm32")]
+    pending: Option<PendingPipelines>,
+    /// Set by `reset` for a `Code` init until the seed shader has been dispatched; it may have
+    /// to wait for `set_pipelines` (and, in the browser, for the backend to accept them).
+    needs_seed: bool,
+    /// Viewport-resolution scene and post targets; created on first frame, resized on demand.
+    scene: Option<SceneTargets>,
+    /// What `other()` reads: layer B's mirror, or the shared 1x1 zero texture.
+    other_view: wgpu::TextureView,
+    /// Rewind snapshots: one grid-sized texture per slot, allocated the first time the slot is
+    /// written, plus the ring that orders them.
+    history_tex: Vec<Option<wgpu::Texture>>,
+    history: SnapshotRing,
+    history_enabled: bool,
+    snapshot_interval: u32,
+    globals: Globals,
+    export: Option<PendingExport>,
+    export_targets: Option<ExportTargets>,
 }
 
 impl Simulation {
-    pub fn new(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        target_format: wgpu::TextureFormat,
-        mut config: SimConfig,
-    ) -> Self {
+    pub fn new(ctx: Arc<GpuContext>, mut config: SimConfig) -> Self {
+        let device = &ctx.device;
         let limits = device.limits();
         config.width = clamp_size(config.width, &limits);
         config.height = clamp_size(config.height, &limits);
 
-        let uniform = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE
-                | wgpu::ShaderStages::FRAGMENT
-                | wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let sampled = |visibility: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
-        let other_tex_entry = |visibility: wgpu::ShaderStages| wgpu::BindGroupLayoutEntry {
-            binding: 4,
-            visibility,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
-        let compute_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ca compute layout"),
-            entries: &[
-                sampled(wgpu::ShaderStages::COMPUTE),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba32Float,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-                uniform(2),
-                uniform(3),
-                other_tex_entry(wgpu::ShaderStages::COMPUTE),
-            ],
-        });
-        let render_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ca render layout"),
-            entries: &[
-                sampled(wgpu::ShaderStages::FRAGMENT),
-                uniform(2),
-                uniform(3),
-                other_tex_entry(wgpu::ShaderStages::FRAGMENT),
-            ],
-        });
-        // With no layer B, `other()` reads this 1x1 zero texture.
-        let empty_other = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("ca empty other"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &empty_other, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::bytes_of(&[0.0f32; 4]),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(16), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        );
-        let empty_other_view = empty_other.create_view(&Default::default());
-        let paint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ca paint layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba32Float,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-                uniform(1),
-            ],
-        });
-        let paint_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ca paint"),
-            source: wgpu::ShaderSource::Wgsl(PAINT_WGSL.into()),
-        });
-        let paint_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ca paint pipeline layout"),
-            bind_group_layouts: &[Some(&paint_layout)],
-            immediate_size: 0,
-        });
-        let paint_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ca paint pipeline"),
-            layout: Some(&paint_pipeline_layout),
-            module: &paint_module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let paint_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ca paint uniform"),
             size: std::mem::size_of::<PaintUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let stats_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ca stats layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let stats_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ca stats"),
-            source: wgpu::ShaderSource::Wgsl(STATS_WGSL.into()),
-        });
-        let stats_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ca stats pipeline layout"),
-            bind_group_layouts: &[Some(&stats_layout)],
-            immediate_size: 0,
-        });
-        let stats_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ca stats pipeline"),
-            layout: Some(&stats_pipeline_layout),
-            module: &stats_module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let stats_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ca stats"),
             size: 8,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ca post layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                uniform(2),
-                uniform(3),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ca post pipeline layout"),
-            bind_group_layouts: &[Some(&post_layout)],
-            immediate_size: 0,
-        });
-        let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ca blit layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let blit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ca blit"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
-        });
-        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("ca blit pipeline layout"),
-            bind_group_layouts: &[Some(&blit_layout)],
-            immediate_size: 0,
-        });
-        let blit_pipeline = fullscreen_pipeline(&device, "ca blit", &blit_pipeline_layout, &blit_module, target_format);
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("ca scene sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
         });
         let stats_slots = (0..3)
             .map(|i| StatsSlot {
@@ -404,18 +177,6 @@ impl Simulation {
                 mapped: Default::default(),
             })
             .collect();
-        let compute_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("ca compute pipeline layout"),
-                bind_group_layouts: &[Some(&compute_layout)],
-                immediate_size: 0,
-            });
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("ca render pipeline layout"),
-                bind_group_layouts: &[Some(&render_layout)],
-                immediate_size: 0,
-            });
         let globals = Globals {
             size: [config.width, config.height],
             mode: mode_code(config.mode),
@@ -425,9 +186,7 @@ impl Simulation {
         let globals_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ca globals"),
             contents: bytemuck::bytes_of(&globals),
-            usage: wgpu::BufferUsages::UNIFORM
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         });
         let params: ParamsData = [[0; 4]; MAX_PARAMS];
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -436,95 +195,56 @@ impl Simulation {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let textures = create_textures(
-            &device,
-            &compute_layout,
-            &render_layout,
-            &paint_layout,
-            &stats_layout,
+            &ctx,
             &globals_buf,
             &params_buf,
             &paint_buf,
             &stats_buf,
-            &empty_other_view,
+            &ctx.empty_other_view,
             config.width,
             config.height,
         );
-        // Anything the error scopes miss is logged rather than aborting the process.
-        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-            log::error!("uncaptured wgpu error: {e}");
-        }));
-        let device_lost: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
-        {
-            let flag = device_lost.clone();
-            device.set_device_lost_callback(move |reason, message| {
-                let text = format!("GPU device lost ({reason:?}): {message}");
-                log::error!("{text}");
-                *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
-            });
-        }
         let history_capacity = snapshot_capacity(config.width, config.height, DEFAULT_BUDGET_BYTES, MAX_SNAPSHOTS);
-        let history_tex = create_history_textures(&device, config.width, config.height, history_capacity);
+        let other_view = ctx.empty_other_view.clone();
         let mut sim = Simulation {
-            device,
-            queue,
-            target_format,
+            ctx,
             config,
-            compute_layout,
-            render_layout,
-            paint_layout,
-            paint_pipeline,
             paint_buf,
-            stats_layout,
-            stats_pipeline,
             stats_buf,
             stats_slots,
-            compute_pipeline_layout,
-            render_pipeline_layout,
             globals_buf,
             params_buf,
             textures,
             cur: 0,
-            compute: None,
-            render: None,
-            post: None,
-            post_layout,
-            post_pipeline_layout,
-            blit_layout,
-            blit_pipeline,
-            sampler,
+            pipelines: None,
+            #[cfg(target_arch = "wasm32")]
+            pending: None,
+            needs_seed: false,
             scene: None,
-            other_view: empty_other_view.clone(),
-            empty_other_view,
-            history_tex,
+            other_view,
+            history_tex: (0..history_capacity).map(|_| None).collect(),
             history: SnapshotRing::new(history_capacity),
+            history_enabled: true,
             snapshot_interval: DEFAULT_INTERVAL,
             globals,
-            device_lost,
             export: None,
+            export_targets: None,
         };
         sim.reset();
         sim
+    }
+
+    pub fn context(&self) -> &Arc<GpuContext> {
+        &self.ctx
     }
 
     pub fn export_pending(&self) -> bool {
         self.export.is_some()
     }
 
-    /// Renders the current state at `scale` pixels per cell through the render and post shaders
-    /// into an offscreen texture and starts reading it back. The result arrives through
-    /// `poll_export` on a later frame.
-    pub fn start_export(&mut self, scale: u32, filename: String) -> Result<(), String> {
-        if self.export.is_some() {
-            return Err("an image export is already in progress".into());
-        }
-        let (Some(render), Some(post)) = (&self.render, &self.post) else {
-            return Err("no render pipeline: fix the shaders first".into());
-        };
-        let max_dim = self.device.limits().max_texture_dimension_2d;
-        let s = clamp_scale(scale, self.config.width, self.config.height, max_dim);
-        let (width, height) = (self.config.width * s, self.config.height * s);
+    fn create_export_targets(&self, width: u32, height: u32) -> ExportTargets {
         let make = |label: &str, format: wgpu::TextureFormat, extra: wgpu::TextureUsages| {
-            self.device.create_texture(&wgpu::TextureDescriptor {
+            self.ctx.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
@@ -537,87 +257,116 @@ impl Simulation {
         };
         let scene_tex = make("ca export scene", SCENE_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING);
         let post_tex = make("ca export post", SCENE_FORMAT, wgpu::TextureUsages::TEXTURE_BINDING);
-        let final_tex = make("ca export final", self.target_format, wgpu::TextureUsages::COPY_SRC);
-        let scene_view = scene_tex.create_view(&Default::default());
-        let post_view = post_tex.create_view(&Default::default());
-        let final_view = final_tex.create_view(&Default::default());
-        // Feedback for the export reads the live post output when there is one, else the scene.
-        let prev_view = match &self.scene {
-            Some(sc) => sc.post_views[sc.cur].clone(),
-            None => scene_view.clone(),
-        };
-        let post_bg = self.post_bind_group(&scene_view, &prev_view);
-        let blit_bg = self.blit_bind_group(&post_view);
+        let final_tex = make("ca export final", self.ctx.target_format, wgpu::TextureUsages::COPY_SRC);
         let padded_bpr = padded_bytes_per_row(width * 4);
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ca export readback"),
             size: (padded_bpr * height) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ca export"),
-        });
+        ExportTargets {
+            width,
+            height,
+            scene_view: scene_tex.create_view(&Default::default()),
+            post_view: post_tex.create_view(&Default::default()),
+            final_tex,
+            buffer,
+            padded_bpr,
+        }
+    }
+
+    /// Renders the current state at `scale` pixels per cell through the render and post shaders
+    /// into an offscreen texture and starts reading it back. The result arrives through
+    /// `poll_export` on a later frame.
+    pub fn start_export(&mut self, scale: u32, filename: String) -> Result<(), String> {
+        if self.export.is_some() {
+            return Err("an image export is already in progress".into());
+        }
+        let Some(pipelines) = &self.pipelines else {
+            return Err("no render pipeline: fix the shaders first".into());
+        };
+        let max_dim = self.ctx.device.limits().max_texture_dimension_2d;
+        let s = clamp_scale(scale, self.config.width, self.config.height, max_dim);
+        let (width, height) = (self.config.width * s, self.config.height * s);
+        let targets = match self.export_targets.take() {
+            Some(t) if t.width == width && t.height == height => t,
+            _ => self.create_export_targets(width, height),
+        };
+        let final_view = targets.final_tex.create_view(&Default::default());
+        // Feedback for the export reads the live post output when there is one, else the scene.
+        let prev_view = match &self.scene {
+            Some(sc) => sc.post_views[sc.cur].clone(),
+            None => targets.scene_view.clone(),
+        };
+        let post_bg = self.post_bind_group(&targets.scene_view, &prev_view);
+        let blit_bg = self.blit_bind_group(&targets.post_view);
+        let mut encoder =
+            self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ca export") });
         {
-            let mut pass = begin_pass(&mut encoder, "ca export render", &scene_view);
-            pass.set_pipeline(render);
+            let mut pass = begin_pass(&mut encoder, "ca export render", &targets.scene_view);
+            pass.set_pipeline(&pipelines.render);
             pass.set_bind_group(0, &self.textures.render_bind_groups[self.cur], &[]);
             pass.draw(0..3, 0..1);
         }
         {
-            let mut pass = begin_pass(&mut encoder, "ca export post", &post_view);
-            pass.set_pipeline(post);
+            let mut pass = begin_pass(&mut encoder, "ca export post", &targets.post_view);
+            pass.set_pipeline(&pipelines.post);
             pass.set_bind_group(0, &post_bg, &[]);
             pass.draw(0..3, 0..1);
         }
         {
             let mut pass = begin_pass(&mut encoder, "ca export blit", &final_view);
-            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_pipeline(&self.ctx.blit_pipeline);
             pass.set_bind_group(0, &blit_bg, &[]);
             pass.draw(0..3, 0..1);
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &final_tex,
+                texture: &targets.final_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
+                buffer: &targets.buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bpr),
+                    bytes_per_row: Some(targets.padded_bpr),
                     rows_per_image: Some(height),
                 },
             },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
-        self.queue.submit([encoder.finish()]);
-        let mapped = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.ctx.queue.submit([encoder.finish()]);
+        let mapped = Arc::new(Mutex::new(None));
         let flag = mapped.clone();
-        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.is_ok());
+        targets.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            *lock(&flag) = Some(r.is_ok());
         });
-        self.export = Some(PendingExport { buffer, width, height, padded_bpr, filename, mapped });
+        self.export = Some(PendingExport { width, height, padded_bpr: targets.padded_bpr, filename, mapped });
+        self.export_targets = Some(targets);
         Ok(())
     }
 
     /// Call once per frame while an export is pending. Returns the PNG when the readback is done.
     pub fn poll_export(&mut self) -> Option<Result<ExportedImage, String>> {
-        let state = self.export.as_ref()?.mapped.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let state = lock(&self.export.as_ref()?.mapped).take();
         let Some(ok) = state else {
             // Give the mapping a chance to complete (a no-op in the browser, where it resolves
             // from the event loop instead).
-            let _ = self.device.poll(wgpu::PollType::Poll);
+            let _ = self.ctx.device.poll(wgpu::PollType::Poll);
             return None;
         };
         let pending = self.export.take()?;
         if !ok {
             return Some(Err("GPU readback failed".into()));
         }
+        let Some(targets) = &self.export_targets else {
+            return Some(Err("export targets vanished".into()));
+        };
         let result = (|| -> anyhow::Result<ExportedImage> {
-            let view = pending.buffer.slice(..).get_mapped_range()?;
+            let view = targets.buffer.slice(..).get_mapped_range()?;
             let mut rgba = unpad_rows(
                 &view[..],
                 pending.padded_bpr as usize,
@@ -625,21 +374,11 @@ impl Simulation {
                 pending.height as usize,
             );
             drop(view);
-            pending.buffer.unmap();
-            to_rgba(&mut rgba, self.target_format);
-            Ok(ExportedImage {
-                filename: pending.filename.clone(),
-                width: pending.width,
-                height: pending.height,
-                rgba,
-            })
+            targets.buffer.unmap();
+            to_rgba(&mut rgba, self.ctx.target_format);
+            Ok(ExportedImage { filename: pending.filename.clone(), width: pending.width, height: pending.height, rgba })
         })();
         Some(result.map_err(|e| format!("image export failed: {e:#}")))
-    }
-
-    /// Returns the device-lost message once, if the device was lost since the last call.
-    pub fn take_device_lost(&self) -> Option<String> {
-        self.device_lost.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub fn config(&self) -> &SimConfig {
@@ -651,7 +390,7 @@ impl Simulation {
     }
 
     pub fn has_pipelines(&self) -> bool {
-        self.compute.is_some() && self.render.is_some() && self.post.is_some()
+        self.pipelines.is_some()
     }
 
     /// The rendered picture (before post-processing), once a scene size has been set. The view
@@ -671,7 +410,7 @@ impl Simulation {
 
     fn create_scene_targets(&self, width: u32, height: u32) -> SceneTargets {
         let make = |label: &str, extra: wgpu::TextureUsages| {
-            self.device.create_texture(&wgpu::TextureDescriptor {
+            self.ctx.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
                 mip_level_count: 1,
@@ -700,12 +439,12 @@ impl Simulation {
     }
 
     fn post_bind_group(&self, scene: &wgpu::TextureView, prev: &wgpu::TextureView) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ca post bg"),
-            layout: &self.post_layout,
+            layout: &self.ctx.post_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(scene) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.ctx.sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: self.globals_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: self.params_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(prev) },
@@ -714,12 +453,12 @@ impl Simulation {
     }
 
     fn blit_bind_group(&self, src: &wgpu::TextureView) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ca blit bg"),
-            layout: &self.blit_layout,
+            layout: &self.ctx.blit_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.ctx.sampler) },
             ],
         })
     }
@@ -727,19 +466,19 @@ impl Simulation {
     /// Draws the state with the render shader into the scene texture, then runs the post shader
     /// into the next post output. Call once per frame after stepping.
     pub fn render_scene(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        let (Some(render), Some(post), Some(scene)) = (&self.render, &self.post, &mut self.scene) else {
+        let (Some(pipelines), Some(scene)) = (&self.pipelines, &mut self.scene) else {
             return;
         };
         {
             let mut pass = begin_pass(encoder, "ca render scene", &scene.scene_view);
-            pass.set_pipeline(render);
+            pass.set_pipeline(&pipelines.render);
             pass.set_bind_group(0, &self.textures.render_bind_groups[self.cur], &[]);
             pass.draw(0..3, 0..1);
         }
         let dst = 1 - scene.cur;
         {
             let mut pass = begin_pass(encoder, "ca post", &scene.post_views[dst]);
-            pass.set_pipeline(post);
+            pass.set_pipeline(&pipelines.post);
             pass.set_bind_group(0, &scene.post_bind_groups[dst], &[]);
             pass.draw(0..3, 0..1);
         }
@@ -749,19 +488,15 @@ impl Simulation {
     /// Applies a new configuration (clamped to device limits), recreating textures if the size
     /// changed, and resets.
     pub fn reconfigure(&mut self, mut config: SimConfig) {
-        let limits = self.device.limits();
+        let limits = self.ctx.device.limits();
         config.width = clamp_size(config.width, &limits);
         config.height = clamp_size(config.height, &limits);
         if config.width != self.config.width || config.height != self.config.height {
             let cap = snapshot_capacity(config.width, config.height, DEFAULT_BUDGET_BYTES, MAX_SNAPSHOTS);
-            self.history_tex = create_history_textures(&self.device, config.width, config.height, cap);
+            self.history_tex = (0..cap).map(|_| None).collect();
             self.history = SnapshotRing::new(cap);
             self.textures = create_textures(
-                &self.device,
-                &self.compute_layout,
-                &self.render_layout,
-                &self.paint_layout,
-                &self.stats_layout,
+                &self.ctx,
                 &self.globals_buf,
                 &self.params_buf,
                 &self.paint_buf,
@@ -779,7 +514,7 @@ impl Simulation {
 
     /// A grid-sized texture another layer can mirror its state into for this layer to read.
     pub fn create_mirror_texture(&self) -> wgpu::Texture {
-        self.device.create_texture(&wgpu::TextureDescriptor {
+        self.ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ca layer mirror"),
             size: wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
             mip_level_count: 1,
@@ -800,21 +535,16 @@ impl Simulation {
     pub fn set_other(&mut self, mirror: Option<&wgpu::Texture>) {
         self.other_view = match mirror {
             Some(t) => t.create_view(&Default::default()),
-            None => self.empty_other_view.clone(),
+            None => self.ctx.empty_other_view.clone(),
         };
+        self.globals.has_other = mirror.is_some() as u32;
+        self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
         let views = [
             self.textures.tex[0].create_view(&Default::default()),
             self.textures.tex[1].create_view(&Default::default()),
         ];
-        let (compute, render) = state_bind_groups(
-            &self.device,
-            &self.compute_layout,
-            &self.render_layout,
-            &views,
-            &self.globals_buf,
-            &self.params_buf,
-            &self.other_view,
-        );
+        let (compute, render) =
+            state_bind_groups(&self.ctx, &views, &self.globals_buf, &self.params_buf, &self.other_view);
         self.textures.compute_bind_groups = compute;
         self.textures.render_bind_groups = render;
     }
@@ -841,28 +571,44 @@ impl Simulation {
         self.snapshot_interval = interval.max(1);
     }
 
+    /// Turns rewind off for good: no snapshots are taken and no history texture is ever
+    /// allocated. For secondary simulations (layer B, explorer thumbnails).
+    pub fn disable_history(&mut self) {
+        self.history_enabled = false;
+        self.history.clear();
+        self.history_tex.iter_mut().for_each(|t| *t = None);
+    }
+
     /// Copies the current state into the next history slot.
     pub fn snapshot_now(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if !self.history_enabled {
+            return;
+        }
         let meta = SnapshotMeta { step: self.globals.frame, row: self.globals.row };
         let slot = self.history.push(meta);
-        copy_whole(encoder, &self.textures.tex[self.cur], &self.history_tex[slot], self.config.width, self.config.height);
+        let (w, h) = (self.config.width, self.config.height);
+        let dst = history_texture(&self.ctx.device, &mut self.history_tex, slot, w, h);
+        copy_whole(encoder, &self.textures.tex[self.cur], dst, w, h);
     }
 
     /// Makes snapshot `index` (oldest first) the current state. The step counter and 1D row
     /// are restored too, so stepping continues from that moment.
     pub fn restore_snapshot(&mut self, encoder: &mut wgpu::CommandEncoder, index: usize) -> Option<SnapshotMeta> {
         let (slot, meta) = self.history.get(index)?;
+        let src = self.history_tex[slot].as_ref()?;
         for tex in &self.textures.tex {
-            copy_whole(encoder, &self.history_tex[slot], tex, self.config.width, self.config.height);
+            copy_whole(encoder, src, tex, self.config.width, self.config.height);
         }
         self.cur = 0;
         self.globals.frame = meta.step;
         self.globals.row = meta.row;
         self.globals.prev_row = meta.row.saturating_sub(1);
-        self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+        self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
         Some(meta)
     }
 
+    /// Restarts from the init pattern. A `Code` init is filled in by the seed shader: right
+    /// away when the pipelines are in place, otherwise as soon as they are.
     pub fn reset(&mut self) {
         let c = &self.config;
         let data = generate_init(&c.init, c.mode, c.width, c.height, c.seed);
@@ -870,7 +616,7 @@ impl Simulation {
         // Both textures get the init state: in 1D mode a step only copies the rows above the
         // write head, so stale rows in the other texture would otherwise show through.
         for tex in &self.textures.tex {
-            self.queue.write_texture(
+            self.ctx.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: tex,
                     mip_level: 0,
@@ -896,9 +642,30 @@ impl Simulation {
             row: 1,
             prev_row: 0,
             blend: self.globals.blend,
-            _pad: [0; 3],
+            has_other: self.globals.has_other,
+            _pad: [0; 2],
         };
-        self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+        self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+        // The seed shader runs at the start of the next `step`, not here: by then the pipelines
+        // are in place and the slider values it may read have been uploaded.
+        self.needs_seed = c.init == InitPattern::Code;
+    }
+
+    /// Records the seed shader over the blank grid left by `reset`: read the (blank) other
+    /// texture, write the current one, then mirror it so both textures hold the start state.
+    fn record_seed(&self, encoder: &mut wgpu::CommandEncoder, seed: &wgpu::ComputePipeline) {
+        let (w, h) = (self.config.width, self.config.height);
+        {
+            let mut pass = encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca seed"), timestamp_writes: None });
+            pass.set_pipeline(seed);
+            pass.set_bind_group(0, &self.textures.compute_bind_groups[1 - self.cur], &[]);
+            match self.config.mode {
+                Mode::TwoD => pass.dispatch_workgroups(w.div_ceil(WORKGROUP), h.div_ceil(WORKGROUP), 1),
+                Mode::OneD => pass.dispatch_workgroups(w.div_ceil(WORKGROUP), 1, 1),
+            }
+        }
+        copy_whole(encoder, &self.textures.tex[self.cur], &self.textures.tex[1 - self.cur], w, h);
     }
 
     /// Replaces the whole state with `data` (`width * height * 4` floats) without touching the
@@ -912,7 +679,7 @@ impl Simulation {
         }
         self.cur = 0;
         for tex in &self.textures.tex {
-            self.queue.write_texture(
+            self.ctx.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: tex,
                     mip_level: 0,
@@ -932,12 +699,12 @@ impl Simulation {
             self.globals.row = c.height;
             self.globals.prev_row = c.height.saturating_sub(1);
         }
-        self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+        self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
         Ok(())
     }
 
     pub fn set_params(&mut self, data: ParamsData) {
-        self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&data));
+        self.ctx.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&data));
     }
 
     pub fn set_time(&mut self, seconds: f32) {
@@ -949,92 +716,119 @@ impl Simulation {
         self.globals.blend = blend.clamp(0.0, 1.0);
     }
 
-    fn backend_error(file: ShaderFile, err: Option<wgpu::Error>) -> Result<(), Vec<ShaderError>> {
-        match err {
-            None => Ok(()),
-            Some(e) => Err(vec![ShaderError {
-                file,
-                line: 1,
-                column: 1,
-                message: format!("GPU backend rejected shader: {e}"),
-                hint: None,
-            }]),
-        }
+    fn create_module(&self, shader: &Validated) -> wgpu::ShaderModule {
+        self.ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(shader.file().label()),
+            source: wgpu::ShaderSource::Wgsl(shader.source().into()),
+        })
     }
 
-    /// Validates with naga, then creates the module inside a validation error scope so a
-    /// backend rejection is returned instead of hitting the uncaptured-error handler.
-    fn create_module(
-        &self,
-        file: ShaderFile,
-        assembled: &Assembled,
-    ) -> Result<wgpu::ShaderModule, Vec<ShaderError>> {
-        validate(file, assembled)?;
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(file.label()),
-            source: wgpu::ShaderSource::Wgsl(assembled.source.as_str().into()),
-        });
-        Self::backend_error(file, pop_scope(scope))?;
-        Ok(module)
-    }
-
-    fn build_compute(&self, assembled: &Assembled) -> Result<wgpu::ComputePipeline, Vec<ShaderError>> {
-        let file = ShaderFile::Rule;
-        let module = self.create_module(file, assembled)?;
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ca compute"),
-            layout: Some(&self.compute_pipeline_layout),
+    fn build_compute(&self, shader: &Validated) -> wgpu::ComputePipeline {
+        let module = self.create_module(shader);
+        self.ctx.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(shader.file().label()),
+            layout: Some(&self.ctx.compute_pipeline_layout),
             module: &module,
             entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
-        });
-        Self::backend_error(file, pop_scope(scope))?;
-        Ok(pipeline)
+        })
     }
 
-    fn build_fullscreen(
-        &self,
-        file: ShaderFile,
-        assembled: &Assembled,
-        layout: &wgpu::PipelineLayout,
-        format: wgpu::TextureFormat,
-    ) -> Result<wgpu::RenderPipeline, Vec<ShaderError>> {
-        let module = self.create_module(file, assembled)?;
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let pipeline = fullscreen_pipeline(&self.device, file.label(), layout, &module, format);
-        Self::backend_error(file, pop_scope(scope))?;
-        Ok(pipeline)
+    fn build_fullscreen(&self, shader: &Validated, layout: &wgpu::PipelineLayout) -> wgpu::RenderPipeline {
+        let module = self.create_module(shader);
+        fullscreen_pipeline(&self.ctx.device, shader.file().label(), layout, &module, SCENE_FORMAT)
     }
 
-    /// Builds the compute, render and post pipelines and swaps them in together. On any error
-    /// nothing changes, so the live pipelines always agree on the `Params` layout.
+    /// Builds the compute, render, post and (optional) seed pipelines from naga-validated
+    /// sources and swaps them in together, so the live pipelines always agree on the `Params`
+    /// layout. Each stage is built inside its own validation error scope so a backend rejection
+    /// is attributed to the right file. On the desktop the scopes resolve synchronously and an
+    /// error means nothing changes. In the browser they resolve later: the new pipelines wait in
+    /// `pending` and are installed by `poll_pipeline_check` once the backend accepted them.
     pub fn set_pipelines(
         &mut self,
-        rule: &Assembled,
-        render: &Assembled,
-        post: &Assembled,
+        rule: &Validated,
+        render: &Validated,
+        post: &Validated,
+        seed: Option<&Validated>,
     ) -> Result<(), Vec<ShaderError>> {
+        let device = &self.ctx.device;
+        let s_rule = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let compute = self.build_compute(rule);
-        let render = self.build_fullscreen(ShaderFile::Render, render, &self.render_pipeline_layout, SCENE_FORMAT);
-        let post = self.build_fullscreen(ShaderFile::Post, post, &self.post_pipeline_layout, SCENE_FORMAT);
-        match (compute, render, post) {
-            (Ok(c), Ok(r), Ok(p)) => {
-                self.compute = Some(c);
-                self.render = Some(r);
-                self.post = Some(p);
-                Ok(())
+        let s_render = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let render = self.build_fullscreen(render, &self.ctx.render_pipeline_layout);
+        let s_post = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let post = self.build_fullscreen(post, &self.ctx.post_pipeline_layout);
+        let s_seed = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let seed = seed.map(|s| self.build_compute(s));
+        // Scopes are a stack: pop in reverse order. Calling `pop` now (even on the web, where the
+        // result arrives later) keeps the device's scope stack balanced.
+        let f_seed = s_seed.pop();
+        let f_post = s_post.pop();
+        let f_render = s_render.pop();
+        let f_rule = s_rule.pop();
+        let pipelines = Pipelines { compute, render, post, seed };
+        self.finish_pipelines(pipelines, [f_rule, f_render, f_post, f_seed])
+    }
+
+    /// The error-scope results of `set_pipelines`, in the order of `SCOPE_FILES`.
+    const SCOPE_FILES: [ShaderFile; 4] = [ShaderFile::Rule, ShaderFile::Render, ShaderFile::Post, ShaderFile::Seed];
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_pipelines(
+        &mut self,
+        pipelines: Pipelines,
+        scopes: [impl Future<Output = Option<wgpu::Error>>; 4],
+    ) -> Result<(), Vec<ShaderError>> {
+        let results = scopes.map(pollster::block_on);
+        let errors = backend_errors(Self::SCOPE_FILES.into_iter().zip(results));
+        if errors.is_empty() {
+            self.pipelines = Some(pipelines);
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn finish_pipelines(
+        &mut self,
+        pipelines: Pipelines,
+        scopes: [impl Future<Output = Option<wgpu::Error>> + 'static; 4],
+    ) -> Result<(), Vec<ShaderError>> {
+        let result: Arc<Mutex<Option<Vec<ShaderError>>>> = Default::default();
+        let slot = result.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut results = Vec::with_capacity(scopes.len());
+            // Scopes resolve in stack order: the innermost (last pushed) first.
+            for scope in scopes.into_iter().rev() {
+                results.push(scope.await);
             }
-            (c, r, p) => {
-                let mut errors = Vec::new();
-                for e in [c.err(), r.err(), p.err()].into_iter().flatten() {
-                    errors.extend(e);
-                }
-                Err(errors)
+            results.reverse();
+            *lock(&slot) = Some(backend_errors(Self::SCOPE_FILES.into_iter().zip(results)));
+        });
+        self.pending = Some(PendingPipelines { pipelines, result });
+        Ok(())
+    }
+
+    /// Call once per frame. Resolves a browser-side backend check: installs the pending
+    /// pipelines when the backend accepted them, or returns the errors (the previous pipelines
+    /// keep running). Always `None` on the desktop, where `set_pipelines` is synchronous.
+    pub fn poll_pipeline_check(&mut self) -> Option<Vec<ShaderError>> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let errors = lock(&self.pending.as_ref()?.result).take()?;
+            let pending = self.pending.take()?;
+            if errors.is_empty() {
+                self.pipelines = Some(pending.pipelines);
+                None
+            } else {
+                Some(errors)
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        None
     }
 
     /// Records brush strokes into the *current* state texture. In 1D mode a stroke paints its
@@ -1046,8 +840,8 @@ impl Simulation {
                 Mode::TwoD => (stroke.y, brush_bbox(stroke.x, stroke.y, stroke.radius, w, h)),
                 Mode::OneD => {
                     let row = self.globals.row.saturating_sub(1).min(h.saturating_sub(1));
-                    let bb = brush_bbox(stroke.x, row as i32, stroke.radius, w, h)
-                        .map(|(x0, _, bw, _)| (x0, row, bw, 1));
+                    let bb =
+                        brush_bbox(stroke.x, row as i32, stroke.radius, w, h).map(|(x0, _, bw, _)| (x0, row, bw, 1));
                     (row as i32, bb)
                 }
             };
@@ -1059,23 +853,15 @@ impl Simulation {
                 _pad: [0.0; 3],
                 value: stroke.value,
             };
-            let staging = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let staging = self.ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("ca paint staging"),
                 contents: bytemuck::bytes_of(&uniform),
                 usage: wgpu::BufferUsages::COPY_SRC,
             });
-            encoder.copy_buffer_to_buffer(
-                &staging,
-                0,
-                &self.paint_buf,
-                0,
-                std::mem::size_of::<PaintUniform>() as u64,
-            );
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ca paint"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.paint_pipeline);
+            encoder.copy_buffer_to_buffer(&staging, 0, &self.paint_buf, 0, std::mem::size_of::<PaintUniform>() as u64);
+            let mut pass = encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca paint"), timestamp_writes: None });
+            pass.set_pipeline(&self.ctx.paint_pipeline);
             pass.set_bind_group(0, &self.textures.paint_bind_groups[self.cur], &[]);
             pass.dispatch_workgroups(bw.div_ceil(WORKGROUP), bh.div_ceil(WORKGROUP), 1);
         }
@@ -1089,17 +875,11 @@ impl Simulation {
         };
         encoder.clear_buffer(&self.stats_buf, 0, None);
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ca stats"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.stats_pipeline);
+            let mut pass = encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca stats"), timestamp_writes: None });
+            pass.set_pipeline(&self.ctx.stats_pipeline);
             pass.set_bind_group(0, &self.textures.stats_bind_groups[self.cur], &[]);
-            pass.dispatch_workgroups(
-                self.config.width.div_ceil(WORKGROUP),
-                self.config.height.div_ceil(WORKGROUP),
-                1,
-            );
+            pass.dispatch_workgroups(self.config.width.div_ceil(WORKGROUP), self.config.height.div_ceil(WORKGROUP), 1);
         }
         encoder.copy_buffer_to_buffer(&self.stats_buf, 0, &slot.buffer, 0, 8);
         slot.state = StatsSlotState::Recorded;
@@ -1109,7 +889,7 @@ impl Simulation {
     /// Advances the readback pool; call once per frame. Returns finished samples, oldest first.
     pub fn poll_stats(&mut self) -> Vec<StatsSample> {
         let mut out = Vec::new();
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        let _ = self.ctx.device.poll(wgpu::PollType::Poll);
         let mut mapped_any = false;
         for slot in &mut self.stats_slots {
             match slot.state {
@@ -1117,15 +897,15 @@ impl Simulation {
                 StatsSlotState::Recorded => {
                     // The copy was submitted with the previous frame; the buffer can be mapped now.
                     let flag = slot.mapped.clone();
-                    *flag.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *lock(&flag) = None;
                     slot.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                        *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(r.is_ok());
+                        *lock(&flag) = Some(r.is_ok());
                     });
                     slot.state = StatsSlotState::Mapping;
                     mapped_any = true;
                 }
                 StatsSlotState::Mapping => {
-                    let done = slot.mapped.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    let done = lock(&slot.mapped).take();
                     if let Some(ok) = done {
                         if ok && let Ok(view) = slot.buffer.slice(..).get_mapped_range() {
                             let words: &[u32] = bytemuck::cast_slice(&view[..]);
@@ -1138,7 +918,7 @@ impl Simulation {
             }
         }
         if mapped_any {
-            let _ = self.device.poll(wgpu::PollType::Poll);
+            let _ = self.ctx.device.poll(wgpu::PollType::Poll);
         }
         out.sort_by_key(|s| s.step);
         out
@@ -1147,8 +927,26 @@ impl Simulation {
     /// Records `n` simulation steps into `encoder`. With `n == 0` only the globals (notably
     /// `time`) are refreshed, so time-based render shaders keep moving while paused.
     pub fn step(&mut self, encoder: &mut wgpu::CommandEncoder, n: u32) {
-        if n == 0 || self.compute.is_none() {
-            self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+        let Some(pipelines) = &self.pipelines else {
+            self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+            return;
+        };
+        if self.needs_seed {
+            // A `Code` init owed by `reset`. In the browser, wait for the pipelines being
+            // checked: they are the ones that should seed, and stepping a blank grid with the
+            // old ones would only be undone.
+            #[cfg(target_arch = "wasm32")]
+            if self.pending.is_some() {
+                self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
+                return;
+            }
+            self.needs_seed = false;
+            if let Some(seed) = &pipelines.seed {
+                self.record_seed(encoder, seed);
+            }
+        }
+        if n == 0 {
+            self.ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&self.globals));
             return;
         }
         let (w, h) = (self.config.width, self.config.height);
@@ -1175,13 +973,12 @@ impl Simulation {
         }
 
         // One staging buffer holds every step's globals; each step copies its slice in.
-        let staging = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let staging = self.ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("ca globals staging"),
             contents: bytemuck::cast_slice(&snapshots),
             usage: wgpu::BufferUsages::COPY_SRC,
         });
         let size = std::mem::size_of::<Globals>() as u64;
-        let pipeline = self.compute.as_ref().expect("checked above");
 
         // Pass 2: record copies and dispatches.
         let mut cur = self.cur;
@@ -1196,11 +993,9 @@ impl Simulation {
                 }
             }
             encoder.copy_buffer_to_buffer(&staging, i as u64 * size, &self.globals_buf, 0, size);
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ca step"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
+            let mut pass = encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ca step"), timestamp_writes: None });
+            pass.set_pipeline(&pipelines.compute);
             pass.set_bind_group(0, &self.textures.compute_bind_groups[src], &[]);
             match plan {
                 None => pass.dispatch_workgroups(w.div_ceil(WORKGROUP), h.div_ceil(WORKGROUP), 1),
@@ -1210,10 +1005,11 @@ impl Simulation {
             cur = dst;
             // Rewind snapshots: the state just written, every `snapshot_interval` steps.
             let step_done = snapshots[i].frame.wrapping_add(1);
-            if should_snapshot(step_done, self.snapshot_interval) {
+            if self.history_enabled && should_snapshot(step_done, self.snapshot_interval) {
                 let row_after = plans[i].map_or(snapshots[i].row, |p| p.next_row);
                 let slot = self.history.push(SnapshotMeta { step: step_done, row: row_after });
-                copy_whole(encoder, &self.textures.tex[cur], &self.history_tex[slot], w, h);
+                let dst_tex = history_texture(&self.ctx.device, &mut self.history_tex, slot, w, h);
+                copy_whole(encoder, &self.textures.tex[cur], dst_tex, w, h);
             }
         }
         self.cur = cur;
@@ -1222,13 +1018,30 @@ impl Simulation {
     /// Copies the latest post output into the active render pass (the viewport).
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'static>) {
         let Some(scene) = &self.scene else { return };
-        if self.post.is_none() {
+        if self.pipelines.is_none() {
             return;
         }
-        pass.set_pipeline(&self.blit_pipeline);
+        pass.set_pipeline(&self.ctx.blit_pipeline);
         pass.set_bind_group(0, &scene.blit_bind_groups[scene.cur], &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+/// Turns per-stage error-scope results into located diagnostics (line 1 of the file: the
+/// backend does not report user lines).
+fn backend_errors(results: impl IntoIterator<Item = (ShaderFile, Option<wgpu::Error>)>) -> Vec<ShaderError> {
+    results
+        .into_iter()
+        .filter_map(|(file, err)| {
+            err.map(|e| ShaderError {
+                file,
+                line: 1,
+                column: 1,
+                message: format!("GPU backend rejected shader: {e}"),
+                hint: None,
+            })
+        })
+        .collect()
 }
 
 fn begin_pass<'a>(
@@ -1251,55 +1064,6 @@ fn begin_pass<'a>(
     })
 }
 
-/// A fullscreen-triangle pipeline (`vs_main` / `fs_main`) writing opaque colour to `format`.
-fn fullscreen_pipeline(
-    device: &wgpu::Device,
-    label: &str,
-    layout: &wgpu::PipelineLayout,
-    module: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    })
-}
-
-/// Resolves a validation error scope. In the browser the result is a promise that cannot be
-/// awaited synchronously, so the scope is simply closed; naga validation already rejects what
-/// the device cannot run and anything else reaches the uncaptured-error handler (console).
-#[cfg(not(target_arch = "wasm32"))]
-fn pop_scope(scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
-    pollster::block_on(scope.pop())
-}
-
-#[cfg(target_arch = "wasm32")]
-fn pop_scope(scope: wgpu::ErrorScopeGuard) -> Option<wgpu::Error> {
-    drop(scope);
-    None
-}
-
 fn mode_code(mode: Mode) -> u32 {
     match mode {
         Mode::TwoD => 0,
@@ -1311,21 +1075,26 @@ fn copy_whole(encoder: &mut wgpu::CommandEncoder, src: &wgpu::Texture, dst: &wgp
     copy_rows(encoder, src, 0, dst, 0, width, height);
 }
 
-fn create_history_textures(device: &wgpu::Device, width: u32, height: u32, count: usize) -> Vec<wgpu::Texture> {
-    (0..count)
-        .map(|i| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(&format!("ca history {i}")),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba32Float,
-                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            })
+/// The history texture for `slot`, created on first use.
+fn history_texture<'a>(
+    device: &wgpu::Device,
+    slots: &'a mut [Option<wgpu::Texture>],
+    slot: usize,
+    width: u32,
+    height: u32,
+) -> &'a wgpu::Texture {
+    slots[slot].get_or_insert_with(|| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("ca history {slot}")),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         })
-        .collect()
+    })
 }
 
 fn copy_rows(
@@ -1359,18 +1128,16 @@ fn copy_rows(
 
 /// Compute (`[i]` reads tex i, writes 1-i) and render (`[i]` reads tex i) bind groups.
 fn state_bind_groups(
-    device: &wgpu::Device,
-    compute_layout: &wgpu::BindGroupLayout,
-    render_layout: &wgpu::BindGroupLayout,
+    ctx: &GpuContext,
     views: &[wgpu::TextureView; 2],
     globals_buf: &wgpu::Buffer,
     params_buf: &wgpu::Buffer,
     other_view: &wgpu::TextureView,
 ) -> ([wgpu::BindGroup; 2], [wgpu::BindGroup; 2]) {
     let compute_bg = |src: usize| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ca compute bg"),
-            layout: compute_layout,
+            layout: &ctx.compute_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[src]) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&views[1 - src]) },
@@ -1381,9 +1148,9 @@ fn state_bind_groups(
         })
     };
     let render_bg = |src: usize| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ca render bg"),
-            layout: render_layout,
+            layout: &ctx.render_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[src]) },
                 wgpu::BindGroupEntry { binding: 2, resource: globals_buf.as_entire_binding() },
@@ -1397,11 +1164,7 @@ fn state_bind_groups(
 
 #[allow(clippy::too_many_arguments)]
 fn create_textures(
-    device: &wgpu::Device,
-    compute_layout: &wgpu::BindGroupLayout,
-    render_layout: &wgpu::BindGroupLayout,
-    paint_layout: &wgpu::BindGroupLayout,
-    stats_layout: &wgpu::BindGroupLayout,
+    ctx: &GpuContext,
     globals_buf: &wgpu::Buffer,
     params_buf: &wgpu::Buffer,
     paint_buf: &wgpu::Buffer,
@@ -1411,7 +1174,7 @@ fn create_textures(
     height: u32,
 ) -> Textures {
     let make = |label: &str| {
-        device.create_texture(&wgpu::TextureDescriptor {
+        ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
@@ -1427,34 +1190,24 @@ fn create_textures(
     };
     let tex = [make("ca state A"), make("ca state B")];
     let views = [tex[0].create_view(&Default::default()), tex[1].create_view(&Default::default())];
-    let (compute_bind_groups, render_bind_groups) =
-        state_bind_groups(device, compute_layout, render_layout, &views, globals_buf, params_buf, other_view);
+    let (compute_bind_groups, render_bind_groups) = state_bind_groups(ctx, &views, globals_buf, params_buf, other_view);
     let paint_bg = |dst: usize| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ca paint bg"),
-            layout: paint_layout,
+            layout: &ctx.paint_layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&views[dst]),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[dst]) },
                 wgpu::BindGroupEntry { binding: 1, resource: paint_buf.as_entire_binding() },
             ],
         })
     };
     let stats_bg = |cur: usize| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ca stats bg"),
-            layout: stats_layout,
+            layout: &ctx.stats_layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&views[cur]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&views[1 - cur]),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&views[cur]) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&views[1 - cur]) },
                 wgpu::BindGroupEntry { binding: 2, resource: stats_buf.as_entire_binding() },
             ],
         })
@@ -1469,38 +1222,47 @@ fn create_textures(
 #[cfg(test)]
 mod gpu_tests {
     use super::*;
-    use crate::preset::builtin::{load_builtin, BUILTINS};
-    use crate::shader::assemble::{assemble_post, assemble_render, assemble_rule, DEFAULT_POST};
+    use crate::preset::builtin::{BUILTINS, load_builtin};
+    use crate::shader::assemble::{DEFAULT_POST, assemble_post, assemble_render, assemble_rule, assemble_seed};
     use crate::shader::params::{merge_params, pack_params, params_wgsl, parse_params};
+    use crate::shader::validate::validate;
 
     /// Creating several devices concurrently from test threads hangs on some drivers, so every
     /// GPU test holds this lock for its whole duration.
-    static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static GPU_LOCK: Mutex<()> = Mutex::new(());
 
     fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
-        GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&GPU_LOCK)
     }
 
-    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    fn context() -> Option<Arc<GpuContext>> {
         let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
-        Some((device, queue))
+        Some(GpuContext::new(device, queue, wgpu::TextureFormat::Bgra8UnormSrgb))
     }
 
     fn sim_with(config: SimConfig) -> Option<Simulation> {
-        let (device, queue) = device()?;
-        Some(Simulation::new(device, queue, wgpu::TextureFormat::Bgra8UnormSrgb, config))
+        Some(Simulation::new(context()?, config))
     }
 
     fn config(mode: Mode, w: u32, h: u32) -> SimConfig {
         SimConfig { mode, width: w, height: h, init: InitPattern::Single, seed: 1 }
     }
 
-    fn assembled_for(rule: &str, render: &str) -> (Assembled, Assembled, Assembled) {
+    fn validated_rule(src: &str, pw: &str) -> Validated {
+        let a = assemble_rule(src, pw);
+        validate(ShaderFile::Rule, &a).unwrap_or_else(|e| panic!("{e:?}\n{}", a.source))
+    }
+
+    fn assembled_for(rule: &str, render: &str) -> (Validated, Validated, Validated) {
         let specs = merge_params(parse_params(rule).unwrap(), parse_params(render).unwrap()).unwrap();
         let pw = params_wgsl(&specs);
-        (assemble_rule(rule, &pw), assemble_render(render, &pw), assemble_post(DEFAULT_POST, &pw))
+        (
+            validated_rule(rule, &pw),
+            validate(ShaderFile::Render, &assemble_render(render, &pw)).unwrap(),
+            validate(ShaderFile::Post, &assemble_post(DEFAULT_POST, &pw)).unwrap(),
+        )
     }
 
     /// Uploads the shaders' default param values, as the app does after a successful apply.
@@ -1511,11 +1273,11 @@ mod gpu_tests {
 
     /// Runs `n` steps, submits, and returns any validation error the GPU backend reported.
     fn step_and_check(sim: &mut Simulation, n: u32) -> Option<wgpu::Error> {
-        let scope = sim.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let mut enc = sim.device.create_command_encoder(&Default::default());
+        let scope = sim.ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut enc = sim.ctx.device.create_command_encoder(&Default::default());
         sim.step(&mut enc, n);
-        sim.queue.submit([enc.finish()]);
-        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+        sim.ctx.queue.submit([enc.finish()]);
+        let _ = sim.ctx.device.poll(wgpu::PollType::wait_indefinitely());
         pollster::block_on(scope.pop())
     }
 
@@ -1523,11 +1285,11 @@ mod gpu_tests {
     #[ignore = "needs a GPU"]
     fn every_builtin_compiles_on_the_real_backend_and_steps() {
         let _gpu = gpu_lock();
-        for b in BUILTINS {
+        for b in BUILTINS.iter() {
             let p = load_builtin(b);
             let (rule, render, post) = assembled_for(&p.rule, &p.render);
             let Some(mut sim) = sim_with(config(p.meta.mode, 64, 32)) else { return };
-            sim.set_pipelines(&rule, &render, &post).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+            sim.set_pipelines(&rule, &render, &post, None).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
             upload_default_params(&mut sim, &p.rule, &p.render);
             assert!(sim.has_pipelines());
             assert!(step_and_check(&mut sim, 40).is_none(), "{}: validation error while stepping", b.id);
@@ -1537,19 +1299,20 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "needs a GPU"]
-    fn bad_shader_is_rejected_and_both_old_pipelines_stay() {
+    fn bad_shader_never_reaches_the_gpu_and_old_pipelines_stay() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[2]);
         let (rule, render, post) = assembled_for(&p.rule, &p.render);
         let Some(mut sim) = sim_with(config(Mode::TwoD, 32, 32)) else { return };
-        sim.set_pipelines(&rule, &render, &post).unwrap();
-        let (bad_rule, _, _) = assembled_for("fn rule(pos: vec2<u32>) -> vec4<f32> { return bogus(; }", &p.render);
-        let errs = sim.set_pipelines(&bad_rule, &render, &post).unwrap_err();
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
+        let pw = params_wgsl(&parse_params(&p.render).unwrap());
+        let bad = assemble_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return bogus(; }", &pw);
+        let errs = validate(ShaderFile::Rule, &bad).unwrap_err();
         assert_eq!((errs[0].file, errs[0].line), (ShaderFile::Rule, 1));
-        let (_, bad_render, _) = assembled_for(&p.rule, "fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return 1.0; }");
-        let errs = sim.set_pipelines(&rule, &bad_render, &post).unwrap_err();
+        let bad_render = assemble_render("fn shade(uv: vec2<f32>, cell: vec4<f32>) -> vec4<f32> { return 1.0; }", &pw);
+        let errs = validate(ShaderFile::Render, &bad_render).unwrap_err();
         assert_eq!(errs[0].file, ShaderFile::Render);
-        assert!(sim.has_pipelines(), "a failed build must not remove the live pipelines");
+        assert!(sim.has_pipelines(), "a failed validation must not touch the live pipelines");
         assert!(step_and_check(&mut sim, 3).is_none());
     }
 
@@ -1557,22 +1320,30 @@ mod gpu_tests {
     fn read_back(sim: &Simulation, which: usize) -> Vec<f32> {
         let (w, h) = (sim.config.width, sim.config.height);
         let bytes = (w * h * 16) as u64;
-        let buf = sim.device.create_buffer(&wgpu::BufferDescriptor {
+        let buf = sim.ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: bytes,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut enc = sim.device.create_command_encoder(&Default::default());
+        let mut enc = sim.ctx.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &sim.textures.tex[which], mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) } },
+            wgpu::TexelCopyTextureInfo {
+                texture: &sim.textures.tex[which],
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 16), rows_per_image: Some(h) },
+            },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        sim.queue.submit([enc.finish()]);
+        sim.ctx.queue.submit([enc.finish()]);
         let slice = buf.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = sim.ctx.device.poll(wgpu::PollType::wait_indefinitely());
         let view = slice.get_mapped_range().expect("buffer mapped");
         let data: Vec<f32> = bytemuck::cast_slice(&view[..]).to_vec();
         data
@@ -1585,7 +1356,7 @@ mod gpu_tests {
         let p = load_builtin(&BUILTINS[0]);
         let (rule, render, post) = assembled_for(&p.rule, &p.render);
         let Some(mut sim) = sim_with(config(Mode::OneD, 16, 4)) else { return };
-        sim.set_pipelines(&rule, &render, &post).unwrap();
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
         upload_default_params(&mut sim, &p.rule, &p.render);
         assert!(step_and_check(&mut sim, 3).is_none());
         // Sanity: rule 30 from a single cell must have produced live cells in the other texture.
@@ -1598,6 +1369,198 @@ mod gpu_tests {
         assert!(a[16 * 4..].chunks(4).all(|px| px[0] == 0.0), "rows below the head are blank");
     }
 
+    /// Indices of the live cells (`.r > 0.5`) in a read-back texture.
+    fn live_cells(data: &[f32]) -> Vec<usize> {
+        data.chunks(4).enumerate().filter(|(_, p)| p[0] > 0.5).map(|(i, _)| i).collect()
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn a_code_init_runs_the_seed_shader_on_reset_into_both_textures() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
+        let pw = params_wgsl(&parse_params(&p.render).unwrap());
+        let seed = validate(
+            ShaderFile::Seed,
+            &assemble_seed("fn seed(pos: vec2<u32>) -> vec4<f32> { return on_if(pos.x == 3u && pos.y == 2u); }", &pw),
+        )
+        .unwrap();
+        let cfg = SimConfig { mode: Mode::TwoD, width: 16, height: 8, init: InitPattern::Code, seed: 1 };
+        let Some(mut sim) = sim_with(cfg.clone()) else { return };
+        // No pipelines yet: the grid is blank and the seed is owed.
+        assert!(sim.needs_seed);
+        assert!(live_cells(&read_back(&sim, 0)).is_empty());
+        sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap();
+        assert!(sim.needs_seed, "the seed waits for the next step, after the params upload");
+        assert!(step_and_check(&mut sim, 0).is_none());
+        assert!(!sim.needs_seed, "a zero-step frame pays the owed seed");
+        assert_eq!(live_cells(&read_back(&sim, 0)), vec![2 * 16 + 3]);
+        assert_eq!(live_cells(&read_back(&sim, 1)), vec![2 * 16 + 3], "the other texture mirrors the seed");
+        // Stepping Life kills the lone cell; a reset brings it back (seeded in the same step).
+        assert!(step_and_check(&mut sim, 1).is_none());
+        assert!(live_cells(&read_back(&sim, sim.cur)).is_empty());
+        sim.reconfigure(cfg);
+        assert!(step_and_check(&mut sim, 0).is_none());
+        assert_eq!(live_cells(&read_back(&sim, 0)), vec![2 * 16 + 3]);
+        // Without a seed shader a code init stays blank, and nothing is left owed.
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
+        sim.reset();
+        assert!(step_and_check(&mut sim, 0).is_none());
+        assert!(!sim.needs_seed);
+        assert!(live_cells(&read_back(&sim, 0)).is_empty());
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn the_seed_shader_sees_the_slider_values_uploaded_after_the_pipelines() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let seed_src = "// @param radius: f32 = 0.0 range 0.0 .. 8.0\nfn seed(pos: vec2<u32>) -> vec4<f32> { return on_if(in_disc(centred(pos), vec2<i32>(0), params.radius)); }";
+        let specs = merge_params(parse_params(&p.rule).unwrap(), parse_params(&p.render).unwrap())
+            .and_then(|s| merge_params(s, parse_params(seed_src).unwrap()))
+            .unwrap();
+        let pw = params_wgsl(&specs);
+        let rule = validated_rule(&p.rule, &pw);
+        let render = validate(ShaderFile::Render, &assemble_render(&p.render, &pw)).unwrap();
+        let post = validate(ShaderFile::Post, &assemble_post(DEFAULT_POST, &pw)).unwrap();
+        let seed = validate(ShaderFile::Seed, &assemble_seed(seed_src, &pw)).unwrap();
+        let Some(mut sim) =
+            sim_with(SimConfig { mode: Mode::TwoD, width: 16, height: 16, init: InitPattern::Code, seed: 1 })
+        else {
+            return;
+        };
+        // The app's order: pipelines first, slider values second, then the frame.
+        sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap();
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("radius".to_string(), crate::shader::params::ParamValue::F32(3.0));
+        sim.set_params(pack_params(&specs, &values));
+        assert!(step_and_check(&mut sim, 0).is_none());
+        let live = live_cells(&read_back(&sim, 0)).len();
+        assert!((25..=32).contains(&live), "a radius-3 disc has about 29 cells, got {live}");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn in_one_d_mode_the_seed_shader_fills_the_first_row_only() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[0]);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
+        let pw = params_wgsl(&parse_params(&p.rule).unwrap());
+        let seed =
+            validate(ShaderFile::Seed, &assemble_seed("fn seed(pos: vec2<u32>) -> vec4<f32> { return on(); }", &pw))
+                .unwrap();
+        let Some(mut sim) =
+            sim_with(SimConfig { mode: Mode::OneD, width: 16, height: 4, init: InitPattern::Code, seed: 1 })
+        else {
+            return;
+        };
+        sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap();
+        assert!(step_and_check(&mut sim, 0).is_none());
+        let live = live_cells(&read_back(&sim, 0));
+        assert_eq!(live, (0..16).collect::<Vec<_>>(), "row 0 is all on, the rows below stay blank");
+        assert_eq!(read_back(&sim, 0), read_back(&sim, 1));
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn every_seeded_builtin_puts_live_cells_on_the_grid() {
+        let _gpu = gpu_lock();
+        for b in BUILTINS.iter().filter(|b| b.seed.is_some()) {
+            let p = load_builtin(b);
+            let seed_src = p.seed.clone().unwrap();
+            let specs = merge_params(parse_params(&p.rule).unwrap(), parse_params(&p.render).unwrap())
+                .and_then(|s| merge_params(s, parse_params(&seed_src).unwrap()))
+                .unwrap();
+            let pw = params_wgsl(&specs);
+            let rule = validated_rule(&p.rule, &pw);
+            let render = validate(ShaderFile::Render, &assemble_render(&p.render, &pw)).unwrap();
+            let post = validate(ShaderFile::Post, &assemble_post(DEFAULT_POST, &pw)).unwrap();
+            let seed = validate(ShaderFile::Seed, &assemble_seed(&seed_src, &pw)).unwrap();
+            let cfg = SimConfig { mode: p.meta.mode, width: 256, height: 256, init: InitPattern::Code, seed: 1 };
+            let Some(mut sim) = sim_with(cfg) else { return };
+            sim.set_params(pack_params(&specs, &std::collections::BTreeMap::new()));
+            sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap_or_else(|e| panic!("{}: {:?}", b.id, e));
+            assert!(step_and_check(&mut sim, 0).is_none(), "{}: validation error while seeding", b.id);
+            // Gray-Scott's seed writes U = 1 everywhere, so count the cells that differ from the bath.
+            let data = read_back(&sim, 0);
+            let distinct: std::collections::HashSet<[u32; 4]> =
+                data.chunks(4).map(|px| [px[0].to_bits(), px[1].to_bits(), px[2].to_bits(), px[3].to_bits()]).collect();
+            assert!(distinct.len() >= 2, "{}: the seed shader drew nothing", b.id);
+            assert!(step_and_check(&mut sim, 10).is_none(), "{}: validation error while stepping", b.id);
+        }
+    }
+
+    /// A seeded built-in, set up at its own grid size with its default sliders and seeded.
+    fn seeded_builtin(builtin_id: &str) -> Option<Simulation> {
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == builtin_id).unwrap());
+        let seed_src = p.seed.clone().unwrap();
+        let specs = merge_params(parse_params(&p.rule).unwrap(), parse_params(&p.render).unwrap())
+            .and_then(|s| merge_params(s, parse_params(&seed_src).unwrap()))
+            .unwrap();
+        let pw = params_wgsl(&specs);
+        let rule = validated_rule(&p.rule, &pw);
+        let render = validate(ShaderFile::Render, &assemble_render(&p.render, &pw)).unwrap();
+        let post = validate(ShaderFile::Post, &assemble_post(DEFAULT_POST, &pw)).unwrap();
+        let seed = validate(ShaderFile::Seed, &assemble_seed(&seed_src, &pw)).unwrap();
+        let cfg = SimConfig {
+            mode: p.meta.mode,
+            width: p.meta.width,
+            height: p.meta.height,
+            init: InitPattern::Code,
+            seed: p.meta.seed,
+        };
+        let mut sim = sim_with(cfg)?;
+        sim.set_pipelines(&rule, &render, &post, Some(&seed)).unwrap();
+        sim.set_params(pack_params(&specs, &std::collections::BTreeMap::new()));
+        assert!(step_and_check(&mut sim, 0).is_none(), "{}: validation error while seeding", builtin_id);
+        Some(sim)
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn the_glider_gun_fires_one_glider_every_thirty_steps() {
+        let _gpu = gpu_lock();
+        let Some(mut sim) = seeded_builtin("glider_gun") else { return };
+        let population = |sim: &Simulation| live_cells(&read_back(sim, sim.cur)).len();
+        assert_eq!(population(&sim), 36, "Gosper's gun has 36 cells");
+        for gliders in 1..=4 {
+            assert!(step_and_check(&mut sim, 30).is_none());
+            assert_eq!(population(&sim), 36 + 5 * gliders, "after {} steps", 30 * gliders);
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn the_acorn_grows() {
+        let _gpu = gpu_lock();
+        let Some(mut sim) = seeded_builtin("acorn") else { return };
+        let population = |sim: &Simulation| live_cells(&read_back(sim, sim.cur)).len();
+        assert_eq!(population(&sim), 7);
+        assert!(step_and_check(&mut sim, 200).is_none());
+        assert!(population(&sim) > 50, "a methuselah should be well under way after 200 steps");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn restless_life_keeps_changing_long_after_plain_life_would_have_settled() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "restless_life").unwrap());
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
+        let cfg = SimConfig { mode: Mode::TwoD, width: 128, height: 128, init: p.meta.init.clone(), seed: 11 };
+        let Some(mut sim) = sim_with(cfg) else { return };
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
+        upload_default_params(&mut sim, &p.rule, &p.render);
+        assert!(step_and_check(&mut sim, 3000).is_none());
+        let before = live_cells(&read_back(&sim, sim.cur));
+        assert!(before.len() > 100, "population collapsed: {}", before.len());
+        assert!(step_and_check(&mut sim, 1).is_none());
+        let after = live_cells(&read_back(&sim, sim.cur));
+        let changed =
+            before.iter().filter(|c| !after.contains(c)).count() + after.iter().filter(|c| !before.contains(c)).count();
+        assert!(changed > 20, "the grid has gone still: only {changed} cells changed in one step");
+    }
+
     #[test]
     #[ignore = "needs a GPU"]
     fn one_d_steps_past_the_bottom_and_with_height_one_without_validation_errors() {
@@ -1606,7 +1569,7 @@ mod gpu_tests {
         let (rule, render, post) = assembled_for(&p.rule, &p.render);
         for h in [1u32, 2, 5] {
             let Some(mut sim) = sim_with(config(Mode::OneD, 16, h)) else { return };
-            sim.set_pipelines(&rule, &render, &post).unwrap();
+            sim.set_pipelines(&rule, &render, &post, None).unwrap();
             assert!(step_and_check(&mut sim, h + 7).is_none(), "height {h}: validation error");
         }
     }
@@ -1626,7 +1589,7 @@ mod gpu_tests {
         }) else {
             return;
         };
-        sim.set_pipelines(&rule, &render, &post).unwrap();
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
         upload_default_params(&mut sim, &t.rule, &t.render);
         assert!(step_and_check(&mut sim, 10).is_none());
         let live = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
@@ -1635,7 +1598,7 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "needs a GPU"]
-    fn export_produces_a_decodable_png_with_live_pixels() {
+    fn export_produces_a_decodable_png_with_live_pixels_and_reuses_its_targets() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[2]);
         let (rule, render, post) = assembled_for(&p.rule, &p.render);
@@ -1648,20 +1611,21 @@ mod gpu_tests {
         }) else {
             return;
         };
-        sim.set_pipelines(&rule, &render, &post).unwrap();
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
         upload_default_params(&mut sim, &p.rule, &p.render);
         assert!(step_and_check(&mut sim, 2).is_none());
-        sim.start_export(2, "life.png".into()).unwrap();
-        assert!(sim.export_pending());
-        let mut result = None;
-        for _ in 0..100 {
-            let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
-            if let Some(r) = sim.poll_export() {
-                result = Some(r);
-                break;
+        let export = |sim: &mut Simulation, name: &str| {
+            sim.start_export(2, name.into()).unwrap();
+            assert!(sim.export_pending());
+            for _ in 0..100 {
+                let _ = sim.ctx.device.poll(wgpu::PollType::wait_indefinitely());
+                if let Some(r) = sim.poll_export() {
+                    return r.expect("export ok");
+                }
             }
-        }
-        let img = result.expect("export finished").expect("export ok");
+            panic!("export never finished");
+        };
+        let img = export(&mut sim, "life.png");
         assert_eq!(img.filename, "life.png");
         assert_eq!((img.width, img.height), (32, 32));
         let decoder = png::Decoder::new(std::io::Cursor::new(img.to_png().unwrap()));
@@ -1672,24 +1636,25 @@ mod gpu_tests {
         let lit = buf[..info.buffer_size()].chunks(4).filter(|px| px[0] > 0 || px[1] > 0 || px[2] > 0).count();
         assert!(lit > 0, "some cells must be coloured");
         assert!(!sim.export_pending());
+        // A second export of the same size reuses the cached targets and buffer.
+        let first_buffer = sim.export_targets.as_ref().map(|t| t.buffer.clone()).expect("targets are kept");
+        let img2 = export(&mut sim, "again.png");
+        assert_eq!((img2.width, img2.height), (32, 32));
+        assert!(sim.export_targets.as_ref().is_some_and(|t| t.buffer == first_buffer), "same readback buffer");
     }
 
     #[test]
     #[ignore = "needs a GPU"]
     fn painting_writes_a_disc_into_the_current_texture() {
         let _gpu = gpu_lock();
-        let Some(mut sim) = sim_with(SimConfig {
-            mode: Mode::TwoD,
-            width: 32,
-            height: 32,
-            init: InitPattern::Blank,
-            seed: 1,
-        }) else {
+        let Some(mut sim) =
+            sim_with(SimConfig { mode: Mode::TwoD, width: 32, height: 32, init: InitPattern::Blank, seed: 1 })
+        else {
             return;
         };
-        let mut enc = sim.device.create_command_encoder(&Default::default());
+        let mut enc = sim.ctx.device.create_command_encoder(&Default::default());
         sim.paint(&mut enc, &[Stroke { x: 16, y: 16, radius: 3.0, value: [1.0, 0.0, 0.0, 1.0] }]);
-        sim.queue.submit([enc.finish()]);
+        sim.ctx.queue.submit([enc.finish()]);
         let data = read_back(&sim, sim.cur);
         let at = |x: usize, y: usize| data[(y * 32 + x) * 4];
         assert_eq!(at(16, 16), 1.0, "centre is painted");
@@ -1704,21 +1669,17 @@ mod gpu_tests {
     #[ignore = "needs a GPU"]
     fn stats_count_population_and_changes() {
         let _gpu = gpu_lock();
-        let Some(mut sim) = sim_with(SimConfig {
-            mode: Mode::TwoD,
-            width: 32,
-            height: 32,
-            init: InitPattern::Blank,
-            seed: 1,
-        }) else {
+        let Some(mut sim) =
+            sim_with(SimConfig { mode: Mode::TwoD, width: 32, height: 32, init: InitPattern::Blank, seed: 1 })
+        else {
             return;
         };
         // Paint a disc into the current texture; the other texture stays blank, so every
         // painted cell also counts as changed.
-        let mut enc = sim.device.create_command_encoder(&Default::default());
+        let mut enc = sim.ctx.device.create_command_encoder(&Default::default());
         sim.paint(&mut enc, &[Stroke { x: 16, y: 16, radius: 3.0, value: [1.0, 0.0, 0.0, 1.0] }]);
         sim.collect_stats(&mut enc);
-        sim.queue.submit([enc.finish()]);
+        sim.ctx.queue.submit([enc.finish()]);
         let painted = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count() as u32;
         let mut samples = Vec::new();
         for _ in 0..50 {
@@ -1726,7 +1687,7 @@ mod gpu_tests {
             if !samples.is_empty() {
                 break;
             }
-            let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+            let _ = sim.ctx.device.poll(wgpu::PollType::wait_indefinitely());
         }
         let s = samples.first().expect("a stats sample");
         assert_eq!(s.population, painted);
@@ -1736,15 +1697,11 @@ mod gpu_tests {
     #[test]
     #[ignore = "needs a GPU"]
     fn load_state_round_trips_image_cells_into_both_textures() {
-        use crate::sim::seed_image::{image_to_cells, RgbaImage, SeedMode};
+        use crate::sim::seed_image::{RgbaImage, SeedMode, image_to_cells};
         let _gpu = gpu_lock();
-        let Some(mut sim) = sim_with(SimConfig {
-            mode: Mode::TwoD,
-            width: 16,
-            height: 16,
-            init: InitPattern::Blank,
-            seed: 1,
-        }) else {
+        let Some(mut sim) =
+            sim_with(SimConfig { mode: Mode::TwoD, width: 16, height: 16, init: InitPattern::Blank, seed: 1 })
+        else {
             return;
         };
         // 2x2 image: white, black / black, white -> four 8x8 blocks.
@@ -1766,23 +1723,20 @@ mod gpu_tests {
     #[ignore = "needs a GPU"]
     fn a_rule_pair_compiles_and_blends() {
         use crate::shader::assemble::assemble_rule_pair;
+        use crate::shader::validate::validate_pair;
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[2]);
         let (_, render, post) = assembled_for(&p.rule, &p.render);
         // Rule B: everything on. At blend 1 the grid must become fully alive after one step.
         let all_on = "fn rule(pos: vec2<u32>) -> vec4<f32> { return on(); }";
         let specs = parse_params(&p.rule).unwrap();
-        let pair = assemble_rule_pair(&p.rule, all_on, &params_wgsl(&specs));
-        let Some(mut sim) = sim_with(SimConfig {
-            mode: Mode::TwoD,
-            width: 16,
-            height: 16,
-            init: InitPattern::Blank,
-            seed: 1,
-        }) else {
+        let pair = validate_pair(&assemble_rule_pair(&p.rule, all_on, &params_wgsl(&specs))).unwrap();
+        let Some(mut sim) =
+            sim_with(SimConfig { mode: Mode::TwoD, width: 16, height: 16, init: InitPattern::Blank, seed: 1 })
+        else {
             return;
         };
-        sim.set_pipelines(&pair, &render, &post).unwrap();
+        sim.set_pipelines(&pair, &render, &post, None).unwrap();
         sim.set_blend(1.0);
         assert!(step_and_check(&mut sim, 1).is_none());
         let live = read_back(&sim, sim.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
@@ -1795,37 +1749,35 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "needs a GPU"]
-    fn snapshots_can_be_restored() {
+    fn snapshots_can_be_restored_and_are_allocated_lazily() {
         let _gpu = gpu_lock();
         let p = load_builtin(&BUILTINS[2]);
         let (rule, render, post) = assembled_for(&p.rule, &p.render);
-        let Some(mut sim) = sim_with(SimConfig {
-            mode: Mode::TwoD,
-            width: 16,
-            height: 16,
-            init: InitPattern::Blank,
-            seed: 1,
-        }) else {
+        let Some(mut sim) =
+            sim_with(SimConfig { mode: Mode::TwoD, width: 16, height: 16, init: InitPattern::Blank, seed: 1 })
+        else {
             return;
         };
-        sim.set_pipelines(&rule, &render, &post).unwrap();
+        assert!(sim.history_tex.iter().all(Option::is_none), "no history texture before the first snapshot");
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
         upload_default_params(&mut sim, &p.rule, &p.render);
         sim.set_snapshot_interval(1);
         // Paint a lone dot (dies in one Life step) and snapshot that state.
-        let mut enc = sim.device.create_command_encoder(&Default::default());
+        let mut enc = sim.ctx.device.create_command_encoder(&Default::default());
         sim.paint(&mut enc, &[Stroke { x: 8, y: 8, radius: 0.5, value: [1.0, 0.0, 0.0, 1.0] }]);
         sim.snapshot_now(&mut enc);
-        sim.queue.submit([enc.finish()]);
+        sim.ctx.queue.submit([enc.finish()]);
         let painted = read_back(&sim, sim.cur);
         assert!(painted.iter().step_by(4).any(|&r| r > 0.5));
         assert!(step_and_check(&mut sim, 3).is_none());
         assert_eq!(sim.history_len(), 4, "one manual plus one per step");
+        assert_eq!(sim.history_tex.iter().filter(|t| t.is_some()).count(), 4, "exactly the used slots exist");
         assert_eq!(sim.frame(), 3);
         assert!(read_back(&sim, sim.cur).iter().step_by(4).all(|&r| r == 0.0), "the dot died");
         // Restore the first snapshot: the dot is back and the step counter rewinds.
-        let mut enc = sim.device.create_command_encoder(&Default::default());
+        let mut enc = sim.ctx.device.create_command_encoder(&Default::default());
         let meta = sim.restore_snapshot(&mut enc, 0).unwrap();
-        sim.queue.submit([enc.finish()]);
+        sim.ctx.queue.submit([enc.finish()]);
         assert_eq!(meta.step, 0);
         assert_eq!(sim.frame(), 0);
         assert_eq!(read_back(&sim, 0), painted);
@@ -1834,37 +1786,290 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "needs a GPU"]
+    fn disabled_history_never_allocates() {
+        let _gpu = gpu_lock();
+        let p = load_builtin(&BUILTINS[2]);
+        let (rule, render, post) = assembled_for(&p.rule, &p.render);
+        let Some(mut sim) = sim_with(config(Mode::TwoD, 16, 16)) else { return };
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
+        sim.disable_history();
+        sim.set_snapshot_interval(1);
+        assert!(step_and_check(&mut sim, 5).is_none());
+        assert_eq!(sim.history_len(), 0);
+        assert!(sim.history_tex.iter().all(Option::is_none));
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
     fn a_layer_can_read_the_other_layers_state() {
         let _gpu = gpu_lock();
         // Both layers must live on the same device, as in the app.
-        let Some((device, queue)) = device() else { return };
+        let Some(ctx) = context() else { return };
         let cfg = |seed| SimConfig { mode: Mode::TwoD, width: 16, height: 16, init: InitPattern::Blank, seed };
-        let mut a = Simulation::new(device.clone(), queue.clone(), wgpu::TextureFormat::Bgra8UnormSrgb, cfg(1));
-        let mut b = Simulation::new(device, queue, wgpu::TextureFormat::Bgra8UnormSrgb, cfg(2));
+        let mut a = Simulation::new(ctx.clone(), cfg(1));
+        let mut b = Simulation::new(ctx.clone(), cfg(2));
         // A copies B; B is everything-on.
         let p = load_builtin(&BUILTINS[2]);
         let (_, render, post) = assembled_for(&p.rule, &p.render);
-        let copy_rule = assemble_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return on_if(other(i32(pos.x), i32(pos.y)).r > 0.5); }", &params_wgsl(&[]));
-        let all_on = assemble_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return on(); }", &params_wgsl(&[]));
-        a.set_pipelines(&copy_rule, &render, &post).unwrap();
-        b.set_pipelines(&all_on, &render, &post).unwrap();
+        let pw = params_wgsl(&[]);
+        let copy_rule = validated_rule(
+            "fn rule(pos: vec2<u32>) -> vec4<f32> { return on_if(other(i32(pos.x), i32(pos.y)).r > 0.5); }",
+            &pw,
+        );
+        let all_on = validated_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return on(); }", &pw);
+        a.set_pipelines(&copy_rule, &render, &post, None).unwrap();
+        b.set_pipelines(&all_on, &render, &post, None).unwrap();
         // Mirrors: each layer reads a copy of the other's state taken before stepping.
         let mirror_b = b.create_mirror_texture();
         a.set_other(Some(&mirror_b));
-        let mut enc = a.device.create_command_encoder(&Default::default());
+        let mut enc = ctx.device.create_command_encoder(&Default::default());
         b.mirror_into(&mut enc, &mirror_b); // B is still blank here
         a.step(&mut enc, 1);
-        a.queue.submit([enc.finish()]);
+        ctx.queue.submit([enc.finish()]);
         assert!(read_back(&a, a.cur).iter().step_by(4).all(|&r| r == 0.0), "blank B -> A stays off");
-        let mut enc = a.device.create_command_encoder(&Default::default());
+        let mut enc = ctx.device.create_command_encoder(&Default::default());
         b.step(&mut enc, 1); // B turns fully on
         b.mirror_into(&mut enc, &mirror_b);
         a.step(&mut enc, 1);
-        a.queue.submit([enc.finish()]);
+        ctx.queue.submit([enc.finish()]);
         let live = read_back(&a, a.cur).iter().step_by(4).filter(|&&r| r > 0.5).count();
         assert_eq!(live, 256, "A copied B's all-on state");
         a.set_other(None);
-        assert!(step_and_check(&mut a, 1).is_none(), "without a layer B, other() reads an empty texture");
+        assert!(step_and_check(&mut a, 1).is_none(), "without a layer B, other() reads zeros");
+        assert!(read_back(&a, a.cur).iter().step_by(4).all(|&r| r == 0.0), "the has_other flag gates other()");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn slither_snakes_survive_and_keep_moving_with_their_scent_layer() {
+        let _gpu = gpu_lock();
+        let Some(ctx) = context() else { return };
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "slither").unwrap());
+        let scent = p.layer_b.clone().expect("slither carries its scent layer");
+        let build = |preset: &crate::preset::Preset| {
+            let (editor, config, _, toml_params) = crate::app::state::preset_to_state(preset);
+            let built = crate::app::state::build_shaders(&editor).unwrap();
+            let mut values = crate::app::state::resolve_values(&built.specs, &toml_params, &Default::default());
+            // No new snakes or food during the test, so the snake mass can only be moved by
+            // eating, or gained from the food the seed scattered.
+            values.insert("spawn".into(), crate::shader::params::ParamValue::F32(0.0));
+            values.insert("food".into(), crate::shader::params::ParamValue::F32(0.0));
+            // Nor any metabolism: this test is about cells only ever moving between snakes.
+            values.insert("metabolism".into(), crate::shader::params::ParamValue::I32(0));
+            let mut sim = Simulation::new(
+                ctx.clone(),
+                SimConfig { mode: Mode::TwoD, width: 256, height: 256, init: config.init, seed: config.seed },
+            );
+            sim.disable_history();
+            sim.set_pipelines(&built.rule, &built.render, &built.post, built.seed.as_ref()).unwrap();
+            sim.set_params(pack_params(&built.specs, &values));
+            sim
+        };
+        let mut a = build(&p);
+        let mut b = build(&scent);
+        let mirror_a = a.create_mirror_texture();
+        let mirror_b = b.create_mirror_texture();
+        a.set_other(Some(&mirror_b));
+        b.set_other(Some(&mirror_a));
+        // `.r` packs kind * 8 + direction + 64 * id (see presets/slither/rule.wgsl).
+        let kind = |c: &[f32]| ((c[0].round() as i32) % 64) / 8;
+        let snake_cells = |sim: &Simulation| {
+            let data = read_back(sim, sim.cur);
+            let heads = data.chunks(4).filter(|c| kind(c) == 2).count();
+            let bodies = data.chunks(4).filter(|c| kind(c) == 1).count();
+            (heads, bodies)
+        };
+        let food_cells = |sim: &Simulation| read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 3).count();
+        // A snake's length is its head's move count (.b / 2048) minus the tail's stamp (.a) plus
+        // one, with the counters wrapping at 2048.
+        let length = |c: &[f32]| {
+            let moves = c[2].round() as i32 / 2048;
+            (((moves - c[3].round() as i32) % 2048 + 2048) % 2048 + 1) as f32
+        };
+        let longest = |sim: &Simulation| {
+            read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 2).map(length).fold(0.0, f32::max)
+        };
+        // Lockstep, as the viewport does it.
+        let run = |a: &mut Simulation, b: &mut Simulation, steps: u32| {
+            let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut enc = ctx.device.create_command_encoder(&Default::default());
+            for _ in 0..steps {
+                a.mirror_into(&mut enc, &mirror_a);
+                b.mirror_into(&mut enc, &mirror_b);
+                b.step(&mut enc, 1);
+                a.step(&mut enc, 1);
+            }
+            ctx.queue.submit([enc.finish()]);
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            pollster::block_on(scope.pop())
+        };
+        assert!(run(&mut a, &mut b, 1).is_none());
+        let (heads0, bodies0) = snake_cells(&a);
+        let food0 = food_cells(&a);
+        assert!(heads0 >= 2, "the seed should scatter several starter heads, got {heads0}");
+        assert!(food0 > heads0, "the seed should scatter food, got {food0} morsels");
+        assert!(
+            bodies0 <= heads0,
+            "after one move each snake has at most one body cell: {heads0} heads, {bodies0} bodies"
+        );
+        for round in 1..=10 {
+            assert!(run(&mut a, &mut b, 300).is_none(), "validation error while slithering");
+            let (heads, bodies) = snake_cells(&a);
+            let food = food_cells(&a);
+            println!(
+                "step {}: {heads} heads, {bodies} body cells, {food} food, longest snake {:.0}",
+                round * 300,
+                longest(&a)
+            );
+            assert!(heads >= 1, "every snake died");
+            // A starter owes at most 1 + 2 * spawn_length (6) cells of growth, so no snake can
+            // exceed fifteen cells without eating; eating another snake only moves cells between
+            // snakes, and eating food turns one morsel into one cell of snake.
+            assert!(
+                heads + bodies + food <= heads0 * 15 + food0,
+                "mass was created out of nothing: {heads0} starters and {food0} food, now {} snake cells and {food} food",
+                heads + bodies
+            );
+        }
+        let (heads, bodies) = snake_cells(&a);
+        assert!(bodies > heads, "snakes should have grown bodies: {heads} heads, {bodies} body cells");
+        let before = read_back(&a, a.cur);
+        assert!(run(&mut a, &mut b, 3).is_none());
+        assert_ne!(before, read_back(&a, a.cur), "the snakes stopped moving");
+        let scent: f32 = read_back(&b, b.cur).chunks(4).map(|c| c[0]).sum();
+        assert!(scent > 0.0, "the scent layer never picked up the snakes");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn slither_does_not_lose_its_longest_snake_over_a_long_run() {
+        let _gpu = gpu_lock();
+        let Some(ctx) = context() else { return };
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "slither").unwrap());
+        let scent = p.layer_b.clone().expect("slither carries its scent layer");
+        // The preset as shipped: spawning and food on.
+        let build = |preset: &crate::preset::Preset| {
+            let (editor, config, _, toml_params) = crate::app::state::preset_to_state(preset);
+            let built = crate::app::state::build_shaders(&editor).unwrap();
+            let values = crate::app::state::resolve_values(&built.specs, &toml_params, &Default::default());
+            let mut sim = Simulation::new(
+                ctx.clone(),
+                SimConfig { mode: Mode::TwoD, width: 256, height: 256, init: config.init, seed: config.seed },
+            );
+            sim.disable_history();
+            sim.set_pipelines(&built.rule, &built.render, &built.post, built.seed.as_ref()).unwrap();
+            sim.set_params(pack_params(&built.specs, &values));
+            sim
+        };
+        let mut a = build(&p);
+        let mut b = build(&scent);
+        let mirror_a = a.create_mirror_texture();
+        let mirror_b = b.create_mirror_texture();
+        a.set_other(Some(&mirror_b));
+        b.set_other(Some(&mirror_a));
+        let run = |a: &mut Simulation, b: &mut Simulation, steps: u32| {
+            let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut enc = ctx.device.create_command_encoder(&Default::default());
+            for _ in 0..steps {
+                a.mirror_into(&mut enc, &mirror_a);
+                b.mirror_into(&mut enc, &mirror_b);
+                b.step(&mut enc, 1);
+                a.step(&mut enc, 1);
+            }
+            ctx.queue.submit([enc.finish()]);
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            pollster::block_on(scope.pop())
+        };
+        // Cell layout, see presets/slither/rule.wgsl: kind and id in .r, stamp + 2048 * moves
+        // in .b, the tail's stamp in .a; length = moves - tail stamp + 1.
+        let kind = |c: &[f32]| ((c[0].round() as i32) % 64) / 8;
+        let id = |c: &[f32]| (c[0].round() as i32) / 64;
+        let length = |c: &[f32]| {
+            let moves = c[2].round() as i32 / 2048;
+            ((moves - c[3].round() as i32) % 2048 + 2048) % 2048 + 1
+        };
+        let heads = |sim: &Simulation| -> Vec<(i32, i32)> {
+            read_back(sim, sim.cur).chunks(4).filter(|c| kind(c) == 2).map(|c| (id(c), length(c))).collect()
+        };
+        let mut previous: Option<(i32, i32)> = None;
+        let mut lost: Vec<(u32, i32, i32)> = Vec::new();
+        for round in 1..=40u32 {
+            assert!(run(&mut a, &mut b, 300).is_none(), "validation error while slithering");
+            let hs = heads(&a);
+            let longest = hs.iter().copied().max_by_key(|h| h.1);
+            if let Some((pid, plen)) = previous
+                && !hs.iter().any(|h| h.0 == pid)
+            {
+                lost.push((round * 300, pid, plen));
+            }
+            if let Some((lid, llen)) = longest {
+                println!("step {}: {} snakes, longest id {lid} length {llen}", round * 300, hs.len());
+            }
+            previous = longest;
+        }
+        println!("longest snakes that vanished (step, id, length): {lost:?}");
+        let big_losses: Vec<_> = lost.iter().filter(|(_, _, l)| *l >= 15).collect();
+        assert!(big_losses.is_empty(), "a long snake vanished: {big_losses:?}");
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn slither_garden_grows_in_the_snakes_wake() {
+        let _gpu = gpu_lock();
+        let Some(ctx) = context() else { return };
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "slither_garden").unwrap());
+        let garden = p.layer_b.clone().expect("the garden is layer B");
+        let build = |preset: &crate::preset::Preset| {
+            let (editor, config, _, toml_params) = crate::app::state::preset_to_state(preset);
+            let built = crate::app::state::build_shaders(&editor).unwrap();
+            let values = crate::app::state::resolve_values(&built.specs, &toml_params, &Default::default());
+            let mut sim = Simulation::new(
+                ctx.clone(),
+                SimConfig { mode: Mode::TwoD, width: 128, height: 128, init: config.init, seed: config.seed },
+            );
+            sim.disable_history();
+            sim.set_pipelines(&built.rule, &built.render, &built.post, built.seed.as_ref()).unwrap();
+            sim.set_params(pack_params(&built.specs, &values));
+            sim
+        };
+        let mut a = build(&p);
+        let mut b = build(&garden);
+        let mirror_a = a.create_mirror_texture();
+        let mirror_b = b.create_mirror_texture();
+        a.set_other(Some(&mirror_b));
+        b.set_other(Some(&mirror_a));
+        let scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut enc = ctx.device.create_command_encoder(&Default::default());
+        for _ in 0..600 {
+            a.mirror_into(&mut enc, &mirror_a);
+            b.mirror_into(&mut enc, &mirror_b);
+            b.step(&mut enc, 1);
+            a.step(&mut enc, 1);
+        }
+        ctx.queue.submit([enc.finish()]);
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        assert!(pollster::block_on(scope.pop()).is_none(), "validation error while gardening");
+        let kind = |c: &[f32]| ((c[0].round() as i32) % 64) / 8;
+        let snakes = read_back(&a, a.cur).chunks(4).filter(|c| kind(c) == 2).count();
+        assert!(snakes >= 1, "every snake died");
+        let garden_state = read_back(&b, b.cur);
+        let living = garden_state.chunks(4).filter(|c| c[2] > 0.5).count();
+        let oldest = garden_state.chunks(4).map(|c| c[3]).fold(0.0, f32::max);
+        println!("{snakes} snakes, {living} living garden cells, oldest {oldest:.0} steps");
+        assert!(living > 20, "the snakes' trails should have sown a garden, got {living} cells");
+        assert!(oldest > 30.0, "garden cells should persist and age, oldest only {oldest:.0} steps");
+        // A picture of the scene through layer A's render (which draws the garden from layer B),
+        // for looking at: written to the temp directory, path printed with --nocapture.
+        a.start_export(3, "slither_garden".into()).unwrap();
+        let image = loop {
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            if let Some(result) = a.poll_export() {
+                break result.unwrap();
+            }
+        };
+        let path = std::env::temp_dir().join("slither_garden.png");
+        std::fs::write(&path, image.to_png().unwrap()).unwrap();
+        println!("wrote {}", path.display());
     }
 
     #[test]
@@ -1872,26 +2077,26 @@ mod gpu_tests {
     fn reconfigure_clamps_and_resizes() {
         let _gpu = gpu_lock();
         let Some(mut sim) = sim_with(config(Mode::TwoD, 8, 8)) else { return };
-        let huge = sim.device.limits().max_texture_dimension_2d.saturating_mul(2);
+        let huge = sim.ctx.device.limits().max_texture_dimension_2d.saturating_mul(2);
         sim.reconfigure(config(Mode::TwoD, huge, 4));
-        assert!(sim.config().width <= sim.device.limits().max_texture_dimension_2d);
+        assert!(sim.config().width <= sim.ctx.device.limits().max_texture_dimension_2d);
         assert_eq!(sim.config().height, 4);
         assert_eq!(sim.frame(), 0);
     }
 
     fn read_globals(sim: &Simulation) -> Globals {
-        let buf = sim.device.create_buffer(&wgpu::BufferDescriptor {
+        let buf = sim.ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: std::mem::size_of::<Globals>() as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut enc = sim.device.create_command_encoder(&Default::default());
+        let mut enc = sim.ctx.device.create_command_encoder(&Default::default());
         enc.copy_buffer_to_buffer(&sim.globals_buf, 0, &buf, 0, std::mem::size_of::<Globals>() as u64);
-        sim.queue.submit([enc.finish()]);
+        sim.ctx.queue.submit([enc.finish()]);
         let slice = buf.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        let _ = sim.device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = sim.ctx.device.poll(wgpu::PollType::wait_indefinitely());
         let view = slice.get_mapped_range().expect("buffer mapped");
         *bytemuck::from_bytes::<Globals>(&view[..])
     }
@@ -1903,7 +2108,7 @@ mod gpu_tests {
         let p = load_builtin(&BUILTINS[2]);
         let (rule, render, post) = assembled_for(&p.rule, &p.render);
         let Some(mut sim) = sim_with(config(Mode::TwoD, 16, 16)) else { return };
-        sim.set_pipelines(&rule, &render, &post).unwrap();
+        sim.set_pipelines(&rule, &render, &post, None).unwrap();
         sim.set_time(5.5);
         assert!(step_and_check(&mut sim, 0).is_none());
         assert_eq!(read_globals(&sim).time, 5.5, "paused: time must still be uploaded");

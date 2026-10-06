@@ -3,9 +3,10 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use super::SavedLocation;
-use crate::preset::bundle::{bundle_filename, from_bundle, to_bundle, BUNDLE_SUFFIX};
-use crate::preset::{preset_exists, scan_presets_dir, slug, Preset};
+use super::{DroppedFile, SavedLocation};
+use crate::preset::bundle::{bundle_filename, from_bundle, to_bundle};
+use crate::preset::{Preset, preset_exists, scan_presets_dir, slug};
+use crate::util::lock;
 
 pub const PRESETS_DIR: &str = "presets";
 
@@ -34,6 +35,14 @@ pub fn save_to(preset: &Preset, location: &SavedLocation) -> anyhow::Result<()> 
     }
 }
 
+/// Removes a saved preset folder (only if it really holds a preset).
+pub fn delete_saved(location: &SavedLocation) -> anyhow::Result<()> {
+    match location {
+        SavedLocation::Folder(path) => Preset::delete_dir(path),
+        SavedLocation::Browser(_) => anyhow::bail!("browser storage is not available on the desktop"),
+    }
+}
+
 /// Asks for a parent folder and returns `<parent>/<slug>` plus whether a preset already exists there.
 pub fn choose_save_location(name: &str) -> Option<(SavedLocation, bool)> {
     let parent = rfd::FileDialog::new().set_title("Choose where to create the preset folder").pick_folder()?;
@@ -44,11 +53,7 @@ pub fn choose_save_location(name: &str) -> Option<(SavedLocation, bool)> {
 
 /// Native confirm dialog.
 pub fn confirm(title: &str, text: &str) -> bool {
-    rfd::MessageDialog::new()
-        .set_title(title)
-        .set_description(text)
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show()
+    rfd::MessageDialog::new().set_title(title).set_description(text).set_buttons(rfd::MessageButtons::YesNo).show()
         == rfd::MessageDialogResult::Yes
 }
 
@@ -66,20 +71,27 @@ pub fn export_bundle(preset: &Preset) -> anyhow::Result<Option<String>> {
     Ok(Some(path.display().to_string()))
 }
 
-static UPLOADED: Mutex<Option<String>> = Mutex::new(None);
+/// Bundle text picked by the user, or the reason it could not be read.
+static UPLOADED: Mutex<Option<Result<String, String>>> = Mutex::new(None);
 
 /// Import: ask for a bundle file and queue its contents for `poll_import`.
 pub fn request_import() {
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("Import preset bundle")
-        .add_filter("Preset bundle", &["toml"])
-        .pick_file()
+    let Some(path) =
+        rfd::FileDialog::new().set_title("Import preset bundle").add_filter("Preset bundle", &["toml"]).pick_file()
     else {
         return;
     };
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| format!("__error__{}: {e}", path.display()));
-    *UPLOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("could not read {}: {e}", path.display()));
+    *lock(&UPLOADED) = Some(text);
+}
+
+/// Returns an imported bundle once, parsed, or an error.
+pub fn poll_import() -> Option<anyhow::Result<Preset>> {
+    let text = lock(&UPLOADED).take()?;
+    Some(match text {
+        Ok(text) => from_bundle(&text),
+        Err(message) => Err(anyhow::anyhow!(message)),
+    })
 }
 
 static UPLOADED_IMAGE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
@@ -94,40 +106,29 @@ pub fn request_image_import() {
         return;
     };
     if let Ok(bytes) = std::fs::read(&path) {
-        *UPLOADED_IMAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(bytes);
+        *lock(&UPLOADED_IMAGE) = Some(bytes);
     }
 }
 
 pub fn poll_image_import() -> Option<Vec<u8>> {
-    UPLOADED_IMAGE.lock().unwrap_or_else(|e| e.into_inner()).take()
+    lock(&UPLOADED_IMAGE).take()
 }
 
-static DROPPED: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
+static DROPPED: Mutex<Vec<DroppedFile>> = Mutex::new(Vec::new());
 
 /// Queues a dropped file's name and bytes for `poll_dropped_files` (synchronous on the desktop).
 pub fn queue_dropped_file(file: &dyn egui::DroppedFile) {
     let name = file.path().to_string_lossy().to_string();
     let entry = match file.bytes() {
-        Ok(bytes) => (name, bytes),
-        Err(e) => (format!("__error__{name}: {e}"), Vec::new()),
+        Ok(bytes) => Ok((name, bytes)),
+        Err(e) => Err(format!("{name}: {e}")),
     };
-    DROPPED.lock().unwrap_or_else(|e| e.into_inner()).push(entry);
+    lock(&DROPPED).push(entry);
 }
 
-/// Dropped files whose bytes are available, oldest first. Names starting with `__error__` carry
-/// a read error message instead of a file.
-pub fn poll_dropped_files() -> Vec<(String, Vec<u8>)> {
-    std::mem::take(&mut *DROPPED.lock().unwrap_or_else(|e| e.into_inner()))
-}
-
-/// Returns an imported bundle once, parsed, or an error message.
-pub fn poll_import() -> Option<anyhow::Result<Preset>> {
-    let text = UPLOADED.lock().unwrap_or_else(|e| e.into_inner()).take()?;
-    Some(if let Some(err) = text.strip_prefix("__error__") {
-        Err(anyhow::anyhow!("could not read {err}"))
-    } else {
-        from_bundle(&text)
-    })
+/// Dropped files whose bytes are available, oldest first.
+pub fn poll_dropped_files() -> Vec<DroppedFile> {
+    std::mem::take(&mut *lock(&DROPPED))
 }
 
 /// Asks where to save the PNG and writes it. `Ok(None)` when the user cancelled.
@@ -143,6 +144,16 @@ pub fn save_png(filename: &str, bytes: &[u8]) -> anyhow::Result<Option<String>> 
     std::fs::write(&path, bytes)?;
     Ok(Some(path.display().to_string()))
 }
+
+/// Drafts only exist in the browser, where closing a tab would otherwise lose unsaved edits.
+/// On the desktop presets live in folders the user controls.
+pub fn save_draft(_bundle_text: &str) {}
+
+pub fn load_draft() -> Option<String> {
+    None
+}
+
+pub fn clear_draft() {}
 
 /// The desktop has no URL; the startup preset comes from the command line instead.
 pub fn startup_preset_from_url() -> Option<String> {
@@ -161,9 +172,4 @@ pub fn share_base_url() -> String {
 
 pub fn is_web() -> bool {
     false
-}
-
-#[allow(dead_code)]
-fn _suffix_is_used() -> &'static str {
-    BUNDLE_SUFFIX
 }

@@ -99,38 +99,249 @@ fn parse_line(line_no: usize, line: &str) -> Option<Result<ParamSpec, ParamError
 /// confusing location, so they are rejected at the `@param` line instead.
 const RESERVED_NAMES: &[&str] = &[
     // keywords
-    "alias", "break", "case", "const", "const_assert", "continue", "continuing", "default",
-    "diagnostic", "discard", "else", "enable", "false", "fn", "for", "if", "let", "loop",
-    "override", "requires", "return", "struct", "switch", "true", "var", "while",
+    "alias",
+    "break",
+    "case",
+    "const",
+    "const_assert",
+    "continue",
+    "continuing",
+    "default",
+    "diagnostic",
+    "discard",
+    "else",
+    "enable",
+    "false",
+    "fn",
+    "for",
+    "if",
+    "let",
+    "loop",
+    "override",
+    "requires",
+    "return",
+    "struct",
+    "switch",
+    "true",
+    "var",
+    "while",
     // reserved words
-    "NULL", "Self", "abstract", "active", "alignas", "alignof", "as", "asm", "asm_fragment",
-    "async", "attribute", "auto", "await", "become", "cast", "catch", "class", "co_await",
-    "co_return", "co_yield", "coherent", "column_major", "common", "compile", "compile_fragment",
-    "concept", "const_cast", "consteval", "constexpr", "constinit", "crate", "debugger",
-    "decltype", "delete", "demote", "demote_to_helper", "do", "dynamic_cast", "enum", "explicit",
-    "export", "extends", "extern", "external", "fallthrough", "filter", "final", "finally",
-    "friend", "from", "fxgroup", "get", "goto", "groupshared", "highp", "impl", "implements",
-    "import", "inline", "instanceof", "interface", "layout", "lowp", "macro", "macro_rules",
-    "match", "mediump", "meta", "mod", "module", "move", "mut", "mutable", "namespace", "new",
-    "nil", "noexcept", "noinline", "nointerpolation", "non_coherent", "noncoherent", "noperspective",
-    "null", "nullptr", "of", "operator", "package", "packoffset", "partition", "pass", "patch",
-    "pixelfragment", "precise", "precision", "premerge", "priv", "protected", "pub", "public",
-    "readonly", "ref", "regardless", "register", "reinterpret_cast", "require", "resource",
-    "restrict", "self", "set", "shared", "sizeof", "smooth", "snorm", "static", "static_assert",
-    "static_cast", "std", "subroutine", "super", "target", "template", "this", "thread_local",
-    "throw", "trait", "try", "type", "typedef", "typeid", "typename", "typeof", "union", "unless",
-    "unorm", "unsafe", "unsized", "use", "using", "varying", "virtual", "volatile", "wgsl",
-    "where", "with", "writeonly", "yield",
+    "NULL",
+    "Self",
+    "abstract",
+    "active",
+    "alignas",
+    "alignof",
+    "as",
+    "asm",
+    "asm_fragment",
+    "async",
+    "attribute",
+    "auto",
+    "await",
+    "become",
+    "cast",
+    "catch",
+    "class",
+    "co_await",
+    "co_return",
+    "co_yield",
+    "coherent",
+    "column_major",
+    "common",
+    "compile",
+    "compile_fragment",
+    "concept",
+    "const_cast",
+    "consteval",
+    "constexpr",
+    "constinit",
+    "crate",
+    "debugger",
+    "decltype",
+    "delete",
+    "demote",
+    "demote_to_helper",
+    "do",
+    "dynamic_cast",
+    "enum",
+    "explicit",
+    "export",
+    "extends",
+    "extern",
+    "external",
+    "fallthrough",
+    "filter",
+    "final",
+    "finally",
+    "friend",
+    "from",
+    "fxgroup",
+    "get",
+    "goto",
+    "groupshared",
+    "highp",
+    "impl",
+    "implements",
+    "import",
+    "inline",
+    "instanceof",
+    "interface",
+    "layout",
+    "lowp",
+    "macro",
+    "macro_rules",
+    "match",
+    "mediump",
+    "meta",
+    "mod",
+    "module",
+    "move",
+    "mut",
+    "mutable",
+    "namespace",
+    "new",
+    "nil",
+    "noexcept",
+    "noinline",
+    "nointerpolation",
+    "non_coherent",
+    "noncoherent",
+    "noperspective",
+    "null",
+    "nullptr",
+    "of",
+    "operator",
+    "package",
+    "packoffset",
+    "partition",
+    "pass",
+    "patch",
+    "pixelfragment",
+    "precise",
+    "precision",
+    "premerge",
+    "priv",
+    "protected",
+    "pub",
+    "public",
+    "readonly",
+    "ref",
+    "regardless",
+    "register",
+    "reinterpret_cast",
+    "require",
+    "resource",
+    "restrict",
+    "self",
+    "set",
+    "shared",
+    "sizeof",
+    "smooth",
+    "snorm",
+    "static",
+    "static_assert",
+    "static_cast",
+    "std",
+    "subroutine",
+    "super",
+    "target",
+    "template",
+    "this",
+    "thread_local",
+    "throw",
+    "trait",
+    "try",
+    "type",
+    "typedef",
+    "typeid",
+    "typename",
+    "typeof",
+    "union",
+    "unless",
+    "unorm",
+    "unsafe",
+    "unsized",
+    "use",
+    "using",
+    "varying",
+    "virtual",
+    "volatile",
+    "wgsl",
+    "where",
+    "with",
+    "writeonly",
+    "yield",
     // predeclared types and the prelude's own identifiers
-    "bool", "f16", "f32", "i32", "u32", "vec2", "vec3", "vec4", "mat2x2", "mat3x3", "mat4x4",
-    "array", "atomic", "ptr", "sampler", "texture_2d", "texture_storage_2d",
-    "params", "globals", "src", "dst", "state", "cell", "prev_cell", "hash", "rand", "wrap",
-    "noise", "alive", "prev_alive", "neighbours", "neighbours4", "moore_sum", "laplacian", "on",
-    "off", "on_if", "gray", "rgb", "hsv", "palette", "cell_at", "scene", "prev", "scene_px",
-    "scene_tex", "scene_sampler", "prev_tex", "post", "neighbours_hex", "neighbours_tri",
-    "neighbours_tri12", "tri_is_up", "hex_cell", "hex_local", "hex_dist", "tri_cell", "other",
-    "other_alive", "other_tex",
-    "rule", "shade", "main", "vs_main", "fs_main", "Globals", "Params", "VsOut", "_unused",
+    "bool",
+    "f16",
+    "f32",
+    "i32",
+    "u32",
+    "vec2",
+    "vec3",
+    "vec4",
+    "mat2x2",
+    "mat3x3",
+    "mat4x4",
+    "array",
+    "atomic",
+    "ptr",
+    "sampler",
+    "texture_2d",
+    "texture_storage_2d",
+    "params",
+    "globals",
+    "src",
+    "dst",
+    "state",
+    "cell",
+    "prev_cell",
+    "hash",
+    "rand",
+    "wrap",
+    "noise",
+    "alive",
+    "prev_alive",
+    "neighbours",
+    "neighbours4",
+    "moore_sum",
+    "laplacian",
+    "on",
+    "off",
+    "on_if",
+    "gray",
+    "rgb",
+    "hsv",
+    "palette",
+    "cell_at",
+    "scene",
+    "prev",
+    "scene_px",
+    "scene_tex",
+    "scene_sampler",
+    "prev_tex",
+    "post",
+    "neighbours_hex",
+    "neighbours_tri",
+    "neighbours_tri12",
+    "tri_is_up",
+    "hex_cell",
+    "hex_local",
+    "hex_dist",
+    "tri_cell",
+    "other",
+    "other_alive",
+    "other_tex",
+    "rule",
+    "shade",
+    "main",
+    "vs_main",
+    "fs_main",
+    "Globals",
+    "Params",
+    "VsOut",
+    "_unused",
 ];
 
 fn valid_name(name: &str) -> Result<(), String> {
@@ -147,16 +358,12 @@ fn valid_name(name: &str) -> Result<(), String> {
 }
 
 fn parse_body(line_no: usize, body: &str) -> Result<ParamSpec, ParamError> {
-    let (name, after_name) = body
-        .split_once(':')
-        .ok_or_else(|| err(line_no, "expected `name: type = default`"))?;
+    let (name, after_name) = body.split_once(':').ok_or_else(|| err(line_no, "expected `name: type = default`"))?;
     let name = name.trim();
     valid_name(name).map_err(|m| err(line_no, m))?;
-    let (ty_str, after_ty) = after_name
-        .split_once('=')
-        .ok_or_else(|| err(line_no, "expected `= default`"))?;
-    let ty = parse_type(ty_str.trim())
-        .ok_or_else(|| err(line_no, format!("unsupported param type `{}`", ty_str.trim())))?;
+    let (ty_str, after_ty) = after_name.split_once('=').ok_or_else(|| err(line_no, "expected `= default`"))?;
+    let ty =
+        parse_type(ty_str.trim()).ok_or_else(|| err(line_no, format!("unsupported param type `{}`", ty_str.trim())))?;
 
     let mut rest = after_ty.trim().to_string();
     let mut color = false;
@@ -166,9 +373,7 @@ fn parse_body(line_no: usize, body: &str) -> Result<ParamSpec, ParamError> {
     }
     let mut range = None;
     let default_str = if let Some((def, rng)) = rest.split_once("range") {
-        let (lo, hi) = rng
-            .split_once("..")
-            .ok_or_else(|| err(line_no, "range must be `LO .. HI`"))?;
+        let (lo, hi) = rng.split_once("..").ok_or_else(|| err(line_no, "range must be `LO .. HI`"))?;
         let lo: f64 = lo.trim().parse().map_err(|_| err(line_no, "bad range lower bound"))?;
         let hi: f64 = hi.trim().parse().map_err(|_| err(line_no, "bad range upper bound"))?;
         range = Some((lo, hi));
@@ -176,8 +381,8 @@ fn parse_body(line_no: usize, body: &str) -> Result<ParamSpec, ParamError> {
     } else {
         rest
     };
-    let default = parse_default(ty, &default_str)
-        .ok_or_else(|| err(line_no, format!("bad default `{default_str}` for type")))?;
+    let default =
+        parse_default(ty, &default_str).ok_or_else(|| err(line_no, format!("bad default `{default_str}` for type")))?;
     if color && !matches!(ty, ParamType::Vec3 | ParamType::Vec4) {
         return Err(err(line_no, "`color` only applies to vec3<f32> or vec4<f32>"));
     }
@@ -207,20 +412,14 @@ pub fn merge_params(a: Vec<ParamSpec>, b: Vec<ParamSpec>) -> Result<Vec<ParamSpe
     for spec in b {
         match out.iter().find(|s| s.name == spec.name) {
             Some(existing) if existing.ty != spec.ty => {
-                return Err(err(
-                    0,
-                    format!("param `{}` declared with two different types", spec.name),
-                ));
+                return Err(err(0, format!("param `{}` declared with two different types", spec.name)));
             }
             Some(_) => {}
             None => out.push(spec),
         }
     }
     if out.len() > MAX_PARAMS {
-        return Err(err(
-            0,
-            format!("at most {MAX_PARAMS} params are supported across both shaders"),
-        ));
+        return Err(err(0, format!("at most {MAX_PARAMS} params are supported across both shaders")));
     }
     Ok(out)
 }
@@ -261,10 +460,7 @@ pub fn pack_slot(v: &ParamValue) -> [u32; 4] {
     }
 }
 
-pub fn pack_params(
-    specs: &[ParamSpec],
-    values: &BTreeMap<String, ParamValue>,
-) -> [[u32; 4]; MAX_PARAMS] {
+pub fn pack_params(specs: &[ParamSpec], values: &BTreeMap<String, ParamValue>) -> [[u32; 4]; MAX_PARAMS] {
     let mut out = [[0u32; 4]; MAX_PARAMS];
     for (i, spec) in specs.iter().take(MAX_PARAMS).enumerate() {
         let v = values.get(&spec.name).filter(|v| v.ty() == spec.ty).unwrap_or(&spec.default);
@@ -280,8 +476,7 @@ mod tests {
 
     #[test]
     fn parses_f32_with_range() {
-        let specs =
-            parse_params("// @param threshold: f32 = 0.5 range 0.0 .. 1.0\nfn rule() {}").unwrap();
+        let specs = parse_params("// @param threshold: f32 = 0.5 range 0.0 .. 1.0\nfn rule() {}").unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "threshold");
         assert_eq!(specs[0].ty, ParamType::F32);
@@ -375,10 +570,7 @@ mod tests {
         assert_eq!(pack_slot(&ParamValue::F32(1.0)), [1.0f32.to_bits(), 0, 0, 0]);
         assert_eq!(pack_slot(&ParamValue::I32(-1)), [(-1i32) as u32, 0, 0, 0]);
         assert_eq!(pack_slot(&ParamValue::Bool(true)), [1, 0, 0, 0]);
-        assert_eq!(
-            pack_slot(&ParamValue::Vec2([1.0, 2.0])),
-            [1.0f32.to_bits(), 2.0f32.to_bits(), 0, 0]
-        );
+        assert_eq!(pack_slot(&ParamValue::Vec2([1.0, 2.0])), [1.0f32.to_bits(), 2.0f32.to_bits(), 0, 0]);
     }
 
     #[test]

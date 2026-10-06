@@ -110,7 +110,7 @@ mod tests {
     use super::*;
     use crate::shader::assemble::assemble_rule;
     use crate::shader::params::params_wgsl;
-    use crate::shader::validate::{validate, ShaderFile};
+    use crate::shader::validate::{ShaderFile, validate};
 
     #[test]
     fn notation_matches_golly_style() {

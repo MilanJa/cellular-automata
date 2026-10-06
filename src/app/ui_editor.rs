@@ -1,5 +1,6 @@
-use super::theme;
 use super::App;
+use super::theme;
+use crate::preset::InitPattern;
 use crate::shader::highlight::layouter;
 use crate::shader::validate::ShaderFile;
 
@@ -15,14 +16,34 @@ fn char_index_of_line(text: &str, line: usize) -> usize {
 fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
     let dirty = app.state.editor.is_dirty(file);
     let header = format!("{title}{}", if dirty { " *" } else { "" });
-    // The post editor starts collapsed while it is still the pass-through default, and the
-    // optional rule B while it is empty.
+    // The post editor starts collapsed while it is still the pass-through default, the
+    // optional rule B while it is empty, and the seed while it is empty and unused.
     let open = match file {
         ShaderFile::Post => app.state.editor.post_for_preset().is_some(),
         ShaderFile::RuleB => app.state.editor.has_rule_b(),
+        ShaderFile::Seed => app.state.editor.has_seed() || app.state.pending.init == InitPattern::Code,
         _ => true,
     };
     egui::CollapsingHeader::new(egui::RichText::new(header).strong()).default_open(open).show(ui, |ui| {
+        if file == ShaderFile::Seed {
+            ui.label(
+                egui::RichText::new(
+                    "Optional `fn seed(pos: vec2<u32>) -> vec4<f32>`: the starting value of every cell, run once \
+                     on Reset when the Grid's init is `code`. Helpers: centred, in_box, in_disc, row_bit, chance, \
+                     plus everything the rule can use.",
+                )
+                .weak(),
+            );
+            if app.state.pending.init != InitPattern::Code {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("The Grid's init is not `code`, so this seed is not used.").weak());
+                    if ui.small_button("Use it").on_hover_text("Set the Grid's init to `code`").clicked() {
+                        app.state.pending.init = InitPattern::Code;
+                        app.init_set_to_code();
+                    }
+                });
+            }
+        }
         if file == ShaderFile::RuleB {
             ui.label(
                 egui::RichText::new(
@@ -52,7 +73,15 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
             if ui.add(apply).clicked() {
                 app.apply_shaders();
             }
-            let n_err = app.state.errors.iter().filter(|e| e.shader_file() == Some(file)).count();
+            if file == ShaderFile::Seed
+                && ui
+                    .button("Apply & reset")
+                    .on_hover_text("Compile the editors, then Reset so the new seed shows")
+                    .clicked()
+            {
+                app.apply_shaders_and_reset();
+            }
+            let n_err = app.state.errors.iter().filter(|e| e.file == file).count();
             if n_err > 0 {
                 ui.colored_label(theme::ERROR, format!("{n_err} error(s)"));
             }
@@ -65,10 +94,10 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
                 ShaderFile::RuleB => &app.state.editor.rule_b,
                 ShaderFile::Render => &app.state.editor.render,
                 ShaderFile::Post => &app.state.editor.post,
+                ShaderFile::Seed => &app.state.editor.seed,
             };
             let idx = char_index_of_line(text, line);
-            let mut st =
-                egui::widgets::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+            let mut st = egui::widgets::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
             st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(idx))));
             st.store(ui.ctx(), id);
             ui.memory_mut(|m| m.request_focus(id));
@@ -78,6 +107,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
             ShaderFile::RuleB => &mut app.state.editor.rule_b,
             ShaderFile::Render => &mut app.state.editor.render,
             ShaderFile::Post => &mut app.state.editor.post,
+            ShaderFile::Seed => &mut app.state.editor.seed,
         };
         let mut lay = layouter();
         let frame = egui::Frame::new()
@@ -105,6 +135,7 @@ fn one_editor(app: &mut App, ui: &mut egui::Ui, file: ShaderFile, title: &str) {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     one_editor(app, ui, ShaderFile::Rule, "Rule (WGSL)");
     one_editor(app, ui, ShaderFile::RuleB, "Rule B (WGSL, optional crossfade)");
+    one_editor(app, ui, ShaderFile::Seed, "Seed (WGSL, initial state)");
     one_editor(app, ui, ShaderFile::Render, "Render (WGSL)");
     one_editor(app, ui, ShaderFile::Post, "Post (WGSL)");
 }

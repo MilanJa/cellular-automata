@@ -1,0 +1,12 @@
+name = "Tutorial 4: Life"
+mode = "2d"
+width = 256
+height = 256
+steps_per_frame = 1
+seed = 42
+
+[init]
+kind = "random"
+density = 0.3
+
+[params]

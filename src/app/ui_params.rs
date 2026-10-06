@@ -1,9 +1,7 @@
-use super::theme;
 use super::App;
+use super::theme;
 use crate::app::modulation::{Modulation, Wave};
-use crate::preset::{InitPattern, Mode};
 use crate::shader::params::{ParamSpec, ParamType, ParamValue};
-use crate::sim::seed_image::SeedMode;
 
 fn slider_f32(ui: &mut egui::Ui, v: &mut f32, range: Option<(f64, f64)>) -> bool {
     match range {
@@ -30,7 +28,11 @@ fn param_widget(ui: &mut egui::Ui, spec: &ParamSpec, value: &mut ParamValue) -> 
         ParamValue::Bool(b) => ui.checkbox(b, "").changed(),
         ParamValue::Vec2(a) => sliders(ui, a, spec.range),
         ParamValue::Vec3(a) => {
-            if spec.color { ui.color_edit_button_rgb(a).changed() } else { sliders(ui, a, spec.range) }
+            if spec.color {
+                ui.color_edit_button_rgb(a).changed()
+            } else {
+                sliders(ui, a, spec.range)
+            }
         }
         ParamValue::Vec4(a) => {
             if spec.color {
@@ -58,12 +60,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     });
     if app.state.specs.is_empty() {
         ui.label(
-            egui::RichText::new("Declare params in a shader with `// @param name: f32 = 0.5 range 0 .. 1`")
-                .weak(),
+            egui::RichText::new("Declare params in a shader with `// @param name: f32 = 0.5 range 0 .. 1`").weak(),
         );
     }
     let mut changed = false;
-    let live = if app.state.modulations.is_empty() { None } else { Some(app.effective_values()) };
+    // Computed once per frame by `push_params`; `None` while nothing is modulated.
+    let live = app.live_values.clone();
     egui::Grid::new("params").num_columns(2).striped(true).show(ui, |ui| {
         for spec in app.state.specs.clone() {
             ui.label(&spec.name);
@@ -83,137 +85,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.push_params();
     }
 
-    theme::section(ui, "Grid");
-    let before = app.state.pending.clone();
-    let p = &mut app.state.pending;
-    egui::Grid::new("grid-settings").num_columns(2).show(ui, |ui| {
-        ui.label("mode");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut p.mode, Mode::TwoD, "2D");
-            ui.selectable_value(&mut p.mode, Mode::OneD, "1D (space-time)");
-        });
-        ui.end_row();
-        ui.label("size");
-        ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut p.width).range(1..=4096).speed(4));
-            ui.label("×");
-            ui.add(egui::DragValue::new(&mut p.height).range(1..=4096).speed(4));
-        });
-        ui.end_row();
-        ui.label("init");
-        ui.horizontal(|ui| {
-            let is_random = matches!(p.init, InitPattern::Random { .. });
-            if ui.selectable_label(is_random, "random").clicked() && !is_random {
-                p.init = InitPattern::Random { density: 0.3 };
-            }
-            if ui.selectable_label(p.init == InitPattern::Single, "single").clicked() {
-                p.init = InitPattern::Single;
-            }
-            if ui.selectable_label(p.init == InitPattern::Blank, "blank").clicked() {
-                p.init = InitPattern::Blank;
-            }
-        });
-        ui.end_row();
-        if let InitPattern::Random { density } = &mut p.init {
-            ui.label("density");
-            ui.add(egui::Slider::new(density, 0.0..=1.0));
-            ui.end_row();
-        }
-        ui.label("seed");
-        ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut p.seed));
-            if ui.button("🎲").on_hover_text("New random seed").clicked() {
-                p.seed = p.seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            }
-        });
-        ui.end_row();
-    });
-    if app.state.pending != before {
-        app.state.modified = true;
-    }
-    ui.horizontal(|ui| {
-        if ui.button("Apply grid settings & reset").clicked() {
-            app.apply_settings_and_reset();
-        }
-        ui.checkbox(&mut app.state.auto_reseed, "auto-reseed when stuck")
-            .on_hover_text("Reset with a new seed after the grid has been static or periodic for 2 s");
-    });
-
-    theme::section(ui, "Audio");
-    ui.horizontal(|ui| {
-        let label = if app.audio.is_some() { "Disable microphone" } else { "Enable microphone" };
-        if ui.button(label).on_hover_text("Audio levels become modulation sources in each slider's ~ menu").clicked() {
-            app.toggle_audio();
-        }
-        if let Some(input) = &app.audio {
-            ui.label(egui::RichText::new(&input.device_name).weak());
-        }
-    });
-    if app.audio.is_some() {
-        let l = app.audio_levels;
-        egui::Grid::new("audio-meters").num_columns(2).show(ui, |ui| {
-            for (name, v) in [("level", l.level), ("low", l.low), ("mid", l.mid), ("high", l.high)] {
-                ui.label(name);
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 10.0), egui::Sense::hover());
-                let painter = ui.painter();
-                painter.rect_filled(rect, 2.0, theme::METER_BG);
-                let w = rect.width() * v.clamp(0.0, 1.0);
-                painter.rect_filled(
-                    egui::Rect::from_min_size(rect.min, egui::vec2(w, rect.height())),
-                    2.0,
-                    theme::ACCENT,
-                );
-                ui.end_row();
-            }
-        });
-    }
-
-    theme::section(ui, "MIDI");
-    ui.horizontal(|ui| {
-        let label = if app.midi.is_some() { "Disable MIDI" } else { "Enable MIDI" };
-        if ui.button(label).on_hover_text("Bind controller knobs to values with Learn in a slider's ~ menu").clicked() {
-            app.toggle_midi();
-        }
-        if let Some(rx) = &app.midi {
-            let ports = if rx.port_names.is_empty() { "waiting for permission...".to_string() } else { rx.port_names.join(", ") };
-            ui.label(egui::RichText::new(ports).weak());
-        }
-    });
-    if app.midi.is_some() {
-        ui.horizontal(|ui| {
-            ui.label("last");
-            match app.last_cc {
-                Some(key) => ui.label(egui::RichText::new(key.label()).monospace()),
-                None => ui.label(egui::RichText::new("nothing yet").weak()),
-            };
-            if let Some(name) = app.state.midi_map.learning() {
-                ui.label(egui::RichText::new(format!("learning {name}: move a knob")).color(theme::WARN));
-            }
-        });
-        let bound: Vec<(String, String)> = app
-            .state
-            .midi_map
-            .bindings
-            .iter()
-            .filter(|(n, _)| app.state.specs.iter().any(|s| &s.name == *n))
-            .map(|(n, k)| (n.clone(), k.label()))
-            .collect();
-        if !bound.is_empty() {
-            egui::Grid::new("midi-bindings").num_columns(2).show(ui, |ui| {
-                for (name, key) in bound {
-                    ui.label(name);
-                    ui.label(egui::RichText::new(key).monospace());
-                    ui.end_row();
-                }
-            });
-        }
-    }
-
     theme::section(ui, "Layer B");
-    ui.label(
-        egui::RichText::new("A second automaton running alongside; shaders read it with other(x, y).")
-            .weak(),
-    );
+    ui.label(egui::RichText::new("A second automaton running alongside; shaders read it with other(x, y).").weak());
     ui.horizontal(|ui| {
         let current = app.layer_b_name().unwrap_or_else(|| "none".to_string());
         let mut pick: Option<Option<crate::preset::Preset>> = None;
@@ -221,10 +94,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if ui.selectable_label(app.layer_b.is_none(), "none").clicked() {
                 pick = Some(None);
             }
-            for b in crate::preset::builtin::BUILTINS {
-                let p = crate::preset::builtin::load_builtin(b);
-                if ui.selectable_label(false, &p.meta.name).clicked() {
-                    pick = Some(Some(p));
+            for b in crate::preset::builtin::BUILTINS.iter() {
+                if ui.selectable_label(false, b.name()).clicked() {
+                    pick = Some(Some(crate::preset::builtin::load_builtin(b)));
                 }
             }
             for (name, location) in app.state.saved_presets.clone() {
@@ -238,59 +110,29 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         if let Some(choice) = pick {
             app.set_layer_b(choice);
+            app.state.modified = true; // layer B is saved with the preset
         }
     });
-
-    theme::section(ui, "Seed image");
-    ui.label(egui::RichText::new("Image > Seed grid from image…, or drop a PNG on the window.").weak());
-    let mut reapply = false;
-    ui.horizontal(|ui| {
-        let is_lum = matches!(app.state.seed_mode, SeedMode::Luminance { .. });
-        if ui.selectable_label(is_lum, "brightness -> on/off").clicked() && !is_lum {
-            app.state.seed_mode = SeedMode::Luminance { threshold: 0.5 };
-            reapply = true;
+    // Layer B's own sliders (plain values: no modulation or MIDI for the second layer).
+    let mut b_changed = false;
+    if let Some(b) = app.layer_b.clone() {
+        let mut b = crate::util::lock(&b);
+        let specs = b.specs.clone();
+        if !specs.is_empty() {
+            egui::Grid::new("params-layer-b").num_columns(2).striped(true).show(ui, |ui| {
+                for spec in &specs {
+                    ui.label(&spec.name);
+                    if let Some(v) = b.values.get_mut(&spec.name) {
+                        b_changed |= param_widget(ui, spec, v);
+                    }
+                    ui.end_row();
+                }
+            });
         }
-        if ui.selectable_label(!is_lum, "RGBA -> channels").clicked() && is_lum {
-            app.state.seed_mode = SeedMode::Channels;
-            reapply = true;
-        }
-    });
-    if let SeedMode::Luminance { threshold } = &mut app.state.seed_mode {
-        ui.horizontal(|ui| {
-            ui.label("threshold");
-            if ui.add(egui::Slider::new(threshold, 0.0..=1.0)).changed() {
-                reapply = true;
-            }
-        });
     }
-    if ui
-        .add_enabled(app.seed_image.is_some(), egui::Button::new("Re-apply image"))
-        .on_hover_text("Write the last image into the grid again with the settings above")
-        .clicked()
-    {
-        reapply = true;
+    if b_changed {
+        app.push_layer_b_params();
     }
-    if reapply && app.seed_image.is_some() {
-        app.apply_seed_image();
-    }
-
-    theme::section(ui, "Brush");
-    ui.label(egui::RichText::new("Drag on the grid to paint; right button erases.").weak());
-    egui::Grid::new("brush").num_columns(2).show(ui, |ui| {
-        ui.label("radius");
-        ui.add(egui::Slider::new(&mut app.state.brush_radius, 0.5..=32.0).logarithmic(true));
-        ui.end_row();
-        ui.label("value");
-        ui.horizontal(|ui| {
-            for v in app.state.brush_value.iter_mut() {
-                ui.add(egui::DragValue::new(v).speed(0.01));
-            }
-            if ui.small_button("on()").on_hover_text("(1, 0, 0, 1)").clicked() {
-                app.state.brush_value = [1.0, 0.0, 0.0, 1.0];
-            }
-        });
-        ui.end_row();
-    });
 }
 
 /// MIDI learn / binding controls at the top of a param's "~" menu. Returns true if a binding was
@@ -349,8 +191,8 @@ fn modulation_button(
     };
     // Keep the menu open while its buttons are clicked (egui closes menus on any button click
     // by default); only a click outside dismisses it.
-    let config = egui::containers::menu::MenuConfig::new()
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    let config =
+        egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     egui::containers::menu::MenuButton::new(label).config(config).ui(ui, |ui| {
         ui.set_min_width(300.0);
         changed |= midi_row(app, ui, spec);
@@ -379,15 +221,13 @@ fn modulation_button(
                             changed |= ui.selectable_value(&mut m.wave, w, w.label()).changed();
                         }
                         if !audio_on {
-                            ui.label(egui::RichText::new("(enable the microphone below)").weak().small());
+                            ui.label(egui::RichText::new("(enable the microphone in the top bar)").weak().small());
                         }
                     });
                     ui.end_row();
                     if !m.wave.is_audio() {
                         ui.label("freq (Hz)");
-                        changed |= ui
-                            .add(egui::Slider::new(&mut m.freq, 0.01..=5.0).logarithmic(true))
-                            .changed();
+                        changed |= ui.add(egui::Slider::new(&mut m.freq, 0.01..=5.0).logarithmic(true)).changed();
                         ui.end_row();
                     }
                     ui.label("amount");
@@ -398,9 +238,7 @@ fn modulation_button(
                         changed |= ui.add(egui::Slider::new(&mut m.phase, 0.0..=1.0)).changed();
                         ui.end_row();
                         ui.label("clock");
-                        changed |= ui
-                            .checkbox(&mut m.follow_sim, "follow simulation (pauses with it)")
-                            .changed();
+                        changed |= ui.checkbox(&mut m.follow_sim, "follow simulation (pauses with it)").changed();
                         ui.end_row();
                     }
                 });

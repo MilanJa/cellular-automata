@@ -1,0 +1,11 @@
+name = "Slither"
+mode = "2d"
+width = 256
+height = 256
+steps_per_frame = 2
+seed = 5
+
+[init]
+kind = "code"
+
+[params]

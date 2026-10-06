@@ -1,0 +1,11 @@
+name = "Slither scent"
+mode = "2d"
+width = 256
+height = 256
+steps_per_frame = 1
+seed = 1
+
+[init]
+kind = "blank"
+
+[params]

@@ -3,11 +3,19 @@
 Live-code 1D and 2D cellular automata as WGSL compute shaders and render them with
 WGSL fragment shaders. Rust, egui, wgpu. Everything runs on the GPU.
 
+**Try it in the browser: <https://milanja.github.io/cellular-automata/>** (needs WebGPU:
+recent Chrome or Edge, Firefox 141+, Safari 26+). No install, nothing uploaded.
+
+New to shaders or to cellular automata? [`docs/tutorial/`](docs/tutorial/README.md) is a
+nine-chapter course that builds up from WGSL basics through Life, reaction-diffusion and 1D
+automata, with a runnable preset per chapter under **File → New from template → Tutorial**.
+
 ## Run
 
     cargo run --release
     cargo run --release -- --preset rule30        # start on a built-in (rule30, rule110, life, gray_scott)
     cargo run --release -- --preset presets/life  # or on a preset folder
+    cargo run --release -- --size 400x800         # a phone-sized window (the compact layout)
 
 ## Writing a rule
 
@@ -66,18 +74,24 @@ the error panel shows the line and, for the common mistakes, a plain-language hi
 **File → New from template** creates an unsaved preset from a commented skeleton that runs as-is:
 *2D binary*, *Life-like with B/S switches* (no code, just checkboxes), *1D elementary*,
 *2D continuous* (diffusion with a reaction term), and *Render only* (Life with a render shader
-to play with). Edit, press Ctrl+Enter, then **File → Save as…** when you like the result.
+to play with). Edit, press Ctrl+Enter, then **File → Save as…** when you like the result. The
+same menu lists the tutorial's presets, one per chapter of [`docs/tutorial/`](docs/tutorial/README.md).
 
 Compile errors show in the bottom panel with the line number in *your* source. Click an
 error to jump to it. The previous working shader keeps running until the new one compiles.
 
 ## Layers
 
-**Layer B** (Params panel) runs a second preset alongside the main one at the same grid size.
+**Layer B** (sidebar, under Params) runs a second preset alongside the main one at the same grid size.
 Both layers' rule and render shaders can read the other layer's previous state with
 `other(x, y)` and `other_alive(x, y)` (zeros when no layer B is loaded), so one automaton can
 gate, seed or colour another. The *Driven by layer B* template is Life that can only grow where
 layer B's `.g` channel is high; load Gray-Scott as layer B to see it.
+
+Layer B is part of the scene: **Save** writes it as a `layer_b/` sub-folder of the preset (a
+`[layer_b]` table in bundles and share links), loading a preset brings its layer B back or clears
+the current one, and **Reset** restarts both layers together. Layer B's own `@param` sliders
+appear under the Layer B picker, and their values are saved with it.
 
 ## Crossfading two rules
 
@@ -99,21 +113,51 @@ Exports go through it too. Neon Life uses it for bloom and trails; the *Post eff
 shows a CRT look (curvature, chromatic aberration, scanlines, vignette) with feedback. A preset
 stores it as `post.wgsl` next to the other two files.
 
+## Seeding with code
+
+The **Grid** popover's *init* chooses how Reset fills the grid: *random* cells at a density,
+*blank*, in 1D mode *single* (one live cell in the middle of the first row, the classic start for
+an elementary automaton), or **code**. With *code*, a fourth editor, **Seed (WGSL)**, computes every
+cell's starting value on the GPU once per Reset:
+
+    fn seed(pos: vec2<u32>) -> vec4<f32>
+
+It has the rule's helpers (`on_if`, `rand`, `params.<name>`, `globals.size`, `globals.seed`) plus
+a few for drawing:
+
+| Seed helper | Meaning |
+|------|---------|
+| `centred(pos) -> vec2<i32>` | the position relative to the middle of the grid |
+| `in_box(p, origin, size)` | inside the box with that top-left corner and size (cells) |
+| `in_disc(p, centre, radius)` | within `radius` cells of `centre` |
+| `row_bit(row, x, width)` | column `x` of a pattern row written as bits, most significant first |
+| `chance(pos, p)` | true for a fraction `p` of the cells, decided by the grid's seed value |
+
+Picking *code* when the editor is empty fills it with a starter (a disc of random cells).
+**Apply & reset** in the seed editor compiles and restarts in one go; a plain Apply (Ctrl+Enter)
+keeps the running grid until the next Reset. Sliders declared in the seed work like any other and
+take effect on Reset. In 1D mode only the first row is seeded. The shader is stored as
+`seed.wgsl` next to the other files, with `kind = "code"` under `[init]` in `preset.toml`.
+
+Three built-ins show the ways to draw a pattern: **Glider Gun** lists Gosper's gun as cell
+coordinates, **Acorn** draws a seven-cell methuselah as rows of bits, and **Gray-Scott Discs**
+writes the U and V channels directly for a ring of catalyst drops, with sliders for the ring.
+
 ## Parameters
 
-Declare live sliders in either shader with a comment:
+Declare live sliders in any shader with a comment:
 
     // @param threshold: f32 = 0.5 range 0.0 .. 1.0
     // @param n: i32 = 3 range 0 .. 8
     // @param on: bool = true            // in WGSL: params.on != 0u
     // @param tint: vec3<f32> = (1, 0.5, 0.2) color
 
-They appear under **Params** and are read as `params.<name>`. Up to 16 params; values
-survive re-applies as long as the name and type stay the same.
+They appear under **Params** and are read as `params.<name>`. Up to 32 params across all
+editors; values survive re-applies as long as the name and type stay the same.
 
 ## 1D automata
 
-Switch **Grid → mode** to *1D (space-time)*. The grid becomes a space-time diagram: each step
+Switch **Grid → mode** (the Grid popover next to Reset) to *1D (space-time)*. The grid becomes a space-time diagram: each step
 writes the next row below the previous one, and once the bottom is reached the diagram scrolls.
 Use `prev_cell(x - 1)`, `prev_cell(x)`, `prev_cell(x + 1)` for an elementary automaton.
 
@@ -123,12 +167,24 @@ generations back. `prev_cell` always reads the right row.
 
 ## Presets
 
-A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`. Folders under
+A preset is a folder containing `preset.toml`, `rule.wgsl` and `render.wgsl`, plus the optional
+`post.wgsl`, `rule_b.wgsl` and `seed.wgsl`. Folders under
 `./presets` appear in the dropdown (**File → Rescan presets** after adding one). **File → Save** (Ctrl+S) writes back to
-a preset's folder; **Save as…** picks a new folder. Built-ins: Rule 30, Rule 110, Game of
-Life, Life-like (B/S), Gray-Scott reaction-diffusion, and Neon Life, whose rule is plain Life but
-whose render shader draws glowing beads, age colours, halos and fading trails: a good example of
-how much the render side alone can do.
+a preset's folder; **Save as…** picks a new folder; **Delete saved preset…** removes the folder
+(or the browser entry) after a confirmation and keeps the scene open, unsaved. Save writes the
+grid settings that are actually applied, so edits in the **Grid** popover (next to Reset) only reach the
+file after **Reset**. Built-ins: Rule 30, Rule 110, Game of
+Life, Life-like (B/S), Gray-Scott reaction-diffusion, Neon Life, whose rule is plain Life but
+whose render shader draws glowing beads, age colours, halos and fading trails (a good example of
+how much the render side alone can do), Hex Life, the three code-seeded ones: Glider Gun,
+Acorn and Gray-Scott Discs, Restless Life, which is Life with a built-in dislike of standing
+still (cells that have not changed for a while flip, so it never settles into still lifes), and
+Slither, a two-layer automaton of snakes that hunt each other: layer A is the snakes as linked
+chains of cells, layer B the scent they steer by, and a longer snake eats a shorter one it
+runs into; long snakes grow flesh around their spine that blocks smaller snakes and that only a
+clearly longer one can plough through. Slither Garden adds a Life-like garden that the snakes sow in their wake (what is
+sown and which rule grows are layer B's sliders): it damps the scent so thickets hide prey, its
+stable structures ripen into food, and snakes can graze on it or be walled in by it.
 
 ## Sharing a scene
 
@@ -155,9 +211,9 @@ Rules with no births or with B0 are skipped.
 
 **Image → Record animation…** captures a number of frames while the simulation plays and saves
 them as a looping animated PNG (APNG, which browsers and most viewers play). Choose pixels per
-cell, frame count and playback rate; frames are captured as fast as the GPU returns them and are
-buffered within a 256 MB budget. **Stop** in the status bar ends a recording early and keeps what
-was captured.
+cell, frame count and playback rate. The simulation holds still while a frame is being read back,
+so consecutive frames are always exactly *steps/frame* steps apart; frames are buffered within a
+256 MB budget. **Stop** in the status bar ends a recording early and keeps what was captured.
 
 ## Rewind
 
@@ -170,27 +226,27 @@ snapshot; press Play to continue from there. Reset clears the history.
 
 **Image → Seed grid from image…** (or drop a PNG onto the window) resamples the picture onto the
 grid. *Brightness → on/off* thresholds the luminance into live cells; *RGBA → channels* copies
-the four colour channels into the four cell channels. Change the mode or threshold and press
-**Re-apply image** to try again. Dropping a `*.capreset.toml` bundle imports it as a preset.
+the four colour channels into the four cell channels. A toolbar appears over the viewport while an image is loaded: change the mode or threshold and
+press **Re-apply** to try again, or **✕** to forget the image. Dropping a `*.capreset.toml` bundle imports it as a preset.
 
 ## Audio reactivity
 
-**Audio → Enable microphone** (Params panel) opens the default input; the browser asks for
+The **○ mic** toggle in the top bar opens the default input; the browser asks for
 permission. Four live levels (overall, low, mid, high band, each auto-gained to 0..1) appear as
-meters and as sources in every slider's **~** menu next to the waves. Audio sources are
+meters in that popover and as sources in every slider's **~** menu next to the waves. Audio sources are
 unipolar: silence leaves the slider's value, sound pushes it up by `amount` of its range.
 
 ## MIDI controllers
 
-**MIDI → Enable MIDI** (Params panel) opens every connected input (the browser asks for
+The **○ MIDI** toggle in the top bar opens every connected input (the browser asks for
 permission). Open a slider's **~** menu and press **Learn**, then move a knob: that controller
 now drives the value across its range. Bindings are saved with the preset (`[midi]` table) and
-listed in the MIDI section. One knob drives one value; learning it again moves it.
+listed in the MIDI popover. One knob drives one value; learning it again moves it.
 
 ## Painting
 
-Drag on the grid with the left mouse button to paint cells, right button to erase. **Brush** (under
-Grid) sets the radius in cells and the value written, default `on()` = (1, 0, 0, 1); for a
+Drag on the grid with the left mouse button to paint cells, right button to erase. The **brush**
+toolbar in the corner of the viewport sets the radius in cells and the value written, default `on()` = (1, 0, 0, 1); for a
 continuous rule such as Gray-Scott, paint into the channel the rule reads (for example
 `0, 1, 0, 1` to seed V). In 1D mode a stroke lands on the most recently written row, which is
 what the next generation reads. Painting works while paused.
@@ -205,11 +261,11 @@ browser downloads `<preset>-step<N>.png`.
 
 | Control | Action |
 |---------|--------|
-| Ctrl+Enter | apply both shaders |
+| Ctrl+Enter | apply all shaders |
 | Space (when no text field has focus) | play / pause |
 | Step | advance one step while paused |
 | steps/frame | simulation steps per rendered frame |
-| Reset | apply grid settings (mode, size, init pattern, seed) and re-initialise |
+| Reset | apply grid settings (mode, size, init pattern, seed) and re-initialise; a `code` init runs the seed shader |
 
 ## Web version
 
@@ -217,10 +273,17 @@ The same app runs in the browser with WebGPU (recent Chrome or Edge, Firefox 141
 Every push to `main` publishes it to https://milanja.github.io/cellular-automata/ .
 Add `?preset=rule30` to the URL to start on a built-in.
 
+On a narrow screen (a phone held upright, or any window under about 720 points wide) the
+layout switches to a compact form: the top bar takes two rows, the grid fills the width, and
+the editors and sliders live in a bottom panel behind the **</> Code** toggle. Painting works
+with a finger.
+
 Differences from the desktop build: presets are saved in the browser's local storage
 (the "Browser storage" section of the dropdown) instead of folders, and **File → Export bundle…** / **Import bundle…**
 move a single `*.capreset.toml` bundle in and out. Export and Import exist on the desktop too, so
-a preset can travel between the two.
+a preset can travel between the two. Unsaved work is also kept as a draft in local storage: open
+the page again without a `?preset` or share link and it comes back, until you save it or load
+another preset.
 
 Build it yourself:
 
@@ -237,3 +300,6 @@ the smaller bundle (faster download and compile) is worth more than CPU micro-op
     cargo test                                        # no GPU needed
     cargo test gpu_tests -- --ignored                 # headless GPU tests (need an adapter)
     cargo clippy --target wasm32-unknown-unknown      # the web build must stay warning-free
+    cargo fmt --all -- --check                        # CI enforces rustfmt (see rustfmt.toml)
+
+CI runs the GPU tests too, on Mesa's software Vulkan driver, as an advisory job.

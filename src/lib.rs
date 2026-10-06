@@ -5,4 +5,5 @@ pub mod platform;
 pub mod preset;
 pub mod shader;
 pub mod sim;
+pub mod util;
 pub mod viewport;

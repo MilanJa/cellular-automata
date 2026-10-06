@@ -3,8 +3,8 @@
 
 use base64::Engine;
 
-use super::bundle::{from_bundle, to_bundle};
 use super::Preset;
+use super::bundle::{from_bundle, to_bundle};
 
 const FRAGMENT_KEY: &str = "p=";
 
@@ -31,10 +31,7 @@ pub fn decode_share_code(code: &str) -> anyhow::Result<Preset> {
 /// The code from a URL fragment such as `#p=…` (leading `#` optional).
 pub fn share_code_from_fragment(fragment: &str) -> Option<String> {
     let f = fragment.strip_prefix('#').unwrap_or(fragment);
-    f.split('&')
-        .find_map(|part| part.strip_prefix(FRAGMENT_KEY))
-        .filter(|c| !c.is_empty())
-        .map(str::to_string)
+    f.split('&').find_map(|part| part.strip_prefix(FRAGMENT_KEY)).filter(|c| !c.is_empty()).map(str::to_string)
 }
 
 /// `base` with its fragment replaced by `#p=<code>`.
@@ -46,7 +43,7 @@ pub fn share_url(base: &str, code: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preset::builtin::{load_builtin, BUILTINS};
+    use crate::preset::builtin::{BUILTINS, load_builtin};
 
     #[test]
     fn a_preset_round_trips_through_a_link_code() {

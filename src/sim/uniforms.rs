@@ -16,7 +16,9 @@ pub struct Globals {
     pub prev_row: u32,
     /// Crossfade between rule A (0) and rule B (1) when a rule pair is loaded.
     pub blend: f32,
-    pub _pad: [u32; 3],
+    /// 1 when `other()` reads a real layer B, 0 when it reads the empty placeholder.
+    pub has_other: u32,
+    pub _pad: [u32; 2],
 }
 
 /// One 16-byte slot per param, in declaration order.
@@ -37,9 +39,10 @@ mod tests {
     }
 
     #[test]
-    fn globals_carry_a_blend_factor() {
-        let g = Globals { blend: 0.25, ..Default::default() };
+    fn globals_carry_a_blend_factor_and_layer_flag() {
+        let g = Globals { blend: 0.25, has_other: 1, ..Default::default() };
         assert_eq!(g.blend, 0.25);
+        assert_eq!(g.has_other, 1);
         assert_eq!(std::mem::size_of::<Globals>() % 16, 0, "uniform structs are 16-byte aligned");
     }
 }
