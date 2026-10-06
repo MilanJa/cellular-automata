@@ -674,6 +674,7 @@ mod tests {
             ("row", offset_of!(Globals, row)),
             ("prev_row", offset_of!(Globals, prev_row)),
             ("blend", offset_of!(Globals, blend)),
+            ("has_other", offset_of!(Globals, has_other)),
         ]
         .into_iter()
         .map(|(n, o)| (n.to_string(), o as u32))

@@ -264,7 +264,13 @@ mod tests {
             eprintln!("git not available; skipping");
             return;
         };
-        let embedded: Vec<&str> = BUILTINS.iter().chain(TEMPLATES).map(|b| b.meta_toml).collect();
+        let embedded: Vec<&str> = BUILTINS
+            .iter()
+            .chain(&TEMPLATES)
+            .chain(&TUTORIAL)
+            .flat_map(|b| std::iter::once(b).chain(b.layer_b))
+            .map(|b| b.meta_toml)
+            .collect();
         let missing: Vec<String> = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|path| {
@@ -273,7 +279,7 @@ mod tests {
             })
             .map(str::to_string)
             .collect();
-        assert!(missing.is_empty(), "add these to BUILTINS or TEMPLATES: {missing:?}");
+        assert!(missing.is_empty(), "add these to BUILTINS, TEMPLATES, TUTORIAL or a layer_b: {missing:?}");
     }
 
     #[test]
