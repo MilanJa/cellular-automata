@@ -24,6 +24,13 @@
 // of 32 cells burns one per `metabolism` moves, a giant burns much faster and a small snake
 // hardly at all. A snake has to keep eating to stay big; 0 switches it off.
 //
+// Momentum: a snake of length L has to go straight for (momentum * L / 8) moves before it can
+// turn at all, and then turns by at most 45 degrees per move beyond that. Short snakes dart
+// about, long ones sweep wide arcs and cannot always swerve away from a bigger snake or from
+// prey they would rather not hit. How straight a snake has run is read off its spine (the
+// body cells behind the head that point the way it is heading), so it needs no state of its
+// own; 0 lets every snake turn freely.
+//
 // Cell layout:  .r = kind * 8 + direction + 64 * id   (kind 0 empty, 1 body, 2 head, 3 food,
 //                    4 flesh; the id tells a snake its own cells from everyone else's)
 //               .g = growth this cell will spend once it is the tail: the size of the meal
@@ -50,6 +57,7 @@
 // @param food: f32 = 0.00002 range 0.0 .. 0.0005
 // @param metabolism: i32 = 40 range 0 .. 120
 // @param width: f32 = 1.0 range 0.0 .. 3.0
+// @param momentum: f32 = 1.0 range 0.0 .. 4.0
 
 const EMPTY = 0;
 const BODY = 1;
@@ -59,6 +67,7 @@ const FLESH = 4;
 const NOBODY = vec2<i32>(-9999, -9999);
 const WRAP = 2048;
 const MAX_WIDTH = 3;
+const MAX_RUN = 16;
 const DIRS = array<vec2<i32>, 8>(
     vec2<i32>(1, 0), vec2<i32>(1, 1), vec2<i32>(0, 1), vec2<i32>(-1, 1),
     vec2<i32>(-1, 0), vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1)
@@ -184,17 +193,46 @@ fn is_deadly(tc: vec4<f32>, my_id: i32, my_len: f32) -> bool {
     return (k == BODY || k == HEAD || k == FLESH) && id_of(tc) != my_id && len_of(tc) > my_len * 1.5 + 2.0;
 }
 
-// Where the head at `p` (state `h`) moves this step. Every direction but straight back is a
-// candidate, scored by what is there (food, a block or death), by how open the cell beyond it
-// is (so the snake does not steer into a dead end), by the scent four cells ahead (prey smells
-// good, bigger snakes smell bad), by a little momentum and a little randomness.
-fn decide(p: vec2<i32>, h: vec4<f32>) -> i32 {
+// How many moves the head at `p` (state `h`) has gone straight: the spine cells right behind
+// it that point the way it is heading, counted up to `limit`.
+fn straight_run(p: vec2<i32>, h: vec4<f32>, limit: i32) -> i32 {
+    let d = dir_of(h);
+    let my_id = id_of(h);
+    var q = p;
+    var run = 0;
+    for (; run < limit; run++) {
+        q -= DIRS[d];
+        let c = cell(q.x, q.y);
+        if (kind_of(c) != BODY || id_of(c) != my_id || dir_of(c) != d) {
+            break;
+        }
+    }
+    return run;
+}
+
+// How far the head may turn this move, in 45-degree steps: freely while the snake is short,
+// otherwise only once it has run straight for momentum * length / 8 moves, one more step for
+// each move beyond that.
+fn max_turn(p: vec2<i32>, h: vec4<f32>) -> i32 {
+    let need = min(i32(params.momentum * len_of(h) / 8.0), MAX_RUN);
+    if (need == 0) {
+        return 3;
+    }
+    return clamp(straight_run(p, h, need + 3) - need, 0, 3);
+}
+
+// The best direction for the head at `p` (state `h`) within `turn` 45-degree steps of its
+// heading (never straight back), scored by what is there (food, a block or death), by how
+// open the cell beyond it is (so the snake does not steer into a dead end), by the scent four
+// cells ahead (prey smells good, bigger snakes smell bad), by a bias for going straight and
+// by a little randomness.
+fn steer(p: vec2<i32>, h: vec4<f32>, turn: i32) -> i32 {
     let d = dir_of(h);
     let my_id = id_of(h);
     let my_len = len_of(h);
     var best = d;
     var best_score = -1e30;
-    for (var k = -3; k <= 3; k++) {
+    for (var k = -turn; k <= turn; k++) {
         let c = (d + k + 8) % 8;
         let t = p + DIRS[c];
         let tc = cell(t.x, t.y);
@@ -229,6 +267,26 @@ fn decide(p: vec2<i32>, h: vec4<f32>) -> i32 {
         }
     }
     return best;
+}
+
+// Where the head at `p` (state `h`) moves this step: the best direction its momentum allows.
+// If all of those are blocked (and the best is not deadly), the snake has stopped, its
+// momentum is spent, and it may turn any way but straight back; otherwise a long snake
+// facing a snake its own size would be stuck until it starved.
+fn decide(p: vec2<i32>, h: vec4<f32>) -> i32 {
+    let turn = max_turn(p, h);
+    let d = steer(p, h, turn);
+    if (turn == 3) {
+        return d;
+    }
+    let my_id = id_of(h);
+    let my_len = len_of(h);
+    let t = p + DIRS[d];
+    let tc = cell(t.x, t.y);
+    if (can_enter(tc, my_id, my_len) || is_deadly(tc, my_id, my_len)) {
+        return d;
+    }
+    return steer(p, h, 3);
 }
 
 // The head that enters cell `t` this step, or NOBODY. Only heads that aim at `t` and may enter

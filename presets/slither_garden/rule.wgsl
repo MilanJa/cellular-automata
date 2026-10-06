@@ -3,7 +3,8 @@
 // The snakes are exactly Slither's (see that preset's rule for the full story): chains of
 // cells with ids and move counters that hunt by scent, eat clearly shorter snakes and food,
 // die against clearly longer ones, never run into themselves, grow flesh around their spine
-// as they get long, and burn cells by metabolism. Layer B carries the scent and, new here, a
+// as they get long, burn cells by metabolism, and have momentum: a snake has to go straight
+// for momentum * length / 8 moves before it can turn, so long ones sweep wide arcs. Layer B carries the scent and, new here, a
 // Life-like garden the snakes sow as they pass (what is sown and what grows are layer B's
 // sliders, in the Layer B section). Two things connect the snakes to the garden:
 //   eat_life     a head moving onto a living garden cell gains a cell of growth, so snakes
@@ -13,11 +14,6 @@
 //   ripen        a garden cell that has lived this many steps turns into food, so only the
 //                stable structures bear fruit: blocks and beehives become orchards a few
 //                hundred steps after the kill that sowed them, and are eaten away by it
-// And unlike Slither, snakes here have momentum:
-//   momentum     a snake has to go straight for momentum * length / 8 moves before it can turn
-//                at all, and then turns by at most 45 degrees per move beyond that, so a long
-//                snake sweeps wide arcs and cannot always swerve away from a bigger snake or
-//                from prey it would rather not hit; 0 turns as freely as Slither's snakes
 //
 // Cell layout:  .r = kind * 8 + direction + 64 * id   (kind 0 empty, 1 body, 2 head, 3 food,
 //                    4 flesh)
@@ -194,15 +190,14 @@ fn max_turn(p: vec2<i32>, h: vec4<f32>) -> i32 {
     return clamp(straight_run(p, h, need + 3) - need, 0, 3);
 }
 
-// Where the head at `p` (state `h`) moves this step: every direction its momentum allows
-// (never straight back), scored by what is there (food, garden to graze, a block or death),
-// by how open the cell beyond is, by the scent four cells ahead, by a bias for going straight
-// and by a little randomness.
-fn decide(p: vec2<i32>, h: vec4<f32>) -> i32 {
+// The best direction for the head at `p` (state `h`) within `turn` 45-degree steps of its
+// heading (never straight back), scored by what is there (food, garden to graze, a block or
+// death), by how open the cell beyond is, by the scent four cells ahead, by a bias for going
+// straight and by a little randomness.
+fn steer(p: vec2<i32>, h: vec4<f32>, turn: i32) -> i32 {
     let d = dir_of(h);
     let my_id = id_of(h);
     let my_len = len_of(h);
-    let turn = max_turn(p, h);
     var best = d;
     var best_score = -1e30;
     for (var k = -turn; k <= turn; k++) {
@@ -240,6 +235,26 @@ fn decide(p: vec2<i32>, h: vec4<f32>) -> i32 {
         }
     }
     return best;
+}
+
+// Where the head at `p` (state `h`) moves this step: the best direction its momentum allows.
+// If all of those are blocked (and the best is not deadly), the snake has stopped, its
+// momentum is spent, and it may turn any way but straight back; otherwise a long snake
+// facing a snake its own size would be stuck until it starved.
+fn decide(p: vec2<i32>, h: vec4<f32>) -> i32 {
+    let turn = max_turn(p, h);
+    let d = steer(p, h, turn);
+    if (turn == 3) {
+        return d;
+    }
+    let my_id = id_of(h);
+    let my_len = len_of(h);
+    let t = p + DIRS[d];
+    let tc = cell(t.x, t.y);
+    if (can_enter(t, tc, my_id, my_len) || is_deadly(tc, my_id, my_len)) {
+        return d;
+    }
+    return steer(p, h, 3);
 }
 
 fn taker_of(t: vec2<i32>) -> vec2<i32> {

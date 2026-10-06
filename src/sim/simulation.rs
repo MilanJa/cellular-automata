@@ -2074,11 +2074,17 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "needs a GPU"]
-    fn slither_garden_momentum_straightens_long_snakes() {
+    fn slither_momentum_straightens_long_snakes() {
         let _gpu = gpu_lock();
         let Some(ctx) = context() else { return };
-        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "slither_garden").unwrap());
-        let garden = p.layer_b.clone().expect("the garden is layer B");
+        for id in ["slither", "slither_garden"] {
+            slither_momentum_straightens_long_snakes_in(&ctx, id);
+        }
+    }
+
+    fn slither_momentum_straightens_long_snakes_in(ctx: &Arc<GpuContext>, id: &str) {
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == id).unwrap());
+        let layer_b = p.layer_b.clone().expect("the scent is layer B");
         let build = |preset: &crate::preset::Preset, momentum: Option<f32>| {
             let (editor, config, _, toml_params) = crate::app::state::preset_to_state(preset);
             let built = crate::app::state::build_shaders(&editor).unwrap();
@@ -2098,7 +2104,7 @@ mod gpu_tests {
         // The share of long snakes' spine cells where the spine bends, after 300 steps.
         let corners = |momentum: f32| {
             let mut a = build(&p, Some(momentum));
-            let mut b = build(&garden, None);
+            let mut b = build(&layer_b, None);
             let mirror_a = a.create_mirror_texture();
             let mirror_b = b.create_mirror_texture();
             a.set_other(Some(&mirror_b));
@@ -2139,8 +2145,8 @@ mod gpu_tests {
                     }
                 }
             }
-            println!("momentum {momentum}: {bends} bends in {spine} spine cells of long snakes");
-            assert!(spine > 100, "too few long snakes to measure at momentum {momentum}: {spine} spine cells");
+            println!("{id}, momentum {momentum}: {bends} bends in {spine} spine cells of long snakes");
+            assert!(spine > 100, "{id}: too few long snakes to measure at momentum {momentum}: {spine} spine cells");
             bends as f32 / spine as f32
         };
         let free = corners(0.0);

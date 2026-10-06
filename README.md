@@ -182,11 +182,11 @@ still (cells that have not changed for a while flip, so it never settles into st
 Slither, a two-layer automaton of snakes that hunt each other: layer A is the snakes as linked
 chains of cells, layer B the scent they steer by, and a longer snake eats a shorter one it
 runs into; long snakes grow flesh around their spine that blocks smaller snakes and that only a
-clearly longer one can plough through. Slither Garden adds a Life-like garden that the snakes sow in their wake (what is
+clearly longer one can plough through; snakes have momentum (a slider), so the longer a snake the
+longer it must run straight before it can turn, and it cannot always swerve away from a fight.
+Slither Garden adds a Life-like garden that the snakes sow in their wake (what is
 sown and which rule grows are layer B's sliders): it damps the scent so thickets hide prey, its
-stable structures ripen into food, and snakes can graze on it or be walled in by it. Its snakes also
-have momentum (a slider): the longer a snake, the longer it must run straight before it can turn,
-so it cannot always swerve away from a fight.
+stable structures ripen into food, and snakes can graze on it or be walled in by it.
 
 ## Sharing a scene
 
