@@ -256,10 +256,8 @@ mod tests {
     #[test]
     fn every_tracked_preset_folder_is_embedded() {
         let root = env!("CARGO_MANIFEST_DIR");
-        let Ok(out) = std::process::Command::new("git")
-            .args(["ls-files", "presets/**/preset.toml"])
-            .current_dir(root)
-            .output()
+        let Ok(out) =
+            std::process::Command::new("git").args(["ls-files", "presets/**/preset.toml"]).current_dir(root).output()
         else {
             eprintln!("git not available; skipping");
             return;

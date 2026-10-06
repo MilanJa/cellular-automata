@@ -2074,6 +2074,85 @@ mod gpu_tests {
 
     #[test]
     #[ignore = "needs a GPU"]
+    fn slither_garden_momentum_straightens_long_snakes() {
+        let _gpu = gpu_lock();
+        let Some(ctx) = context() else { return };
+        let p = load_builtin(BUILTINS.iter().find(|b| b.id == "slither_garden").unwrap());
+        let garden = p.layer_b.clone().expect("the garden is layer B");
+        let build = |preset: &crate::preset::Preset, momentum: Option<f32>| {
+            let (editor, config, _, toml_params) = crate::app::state::preset_to_state(preset);
+            let built = crate::app::state::build_shaders(&editor).unwrap();
+            let mut values = crate::app::state::resolve_values(&built.specs, &toml_params, &Default::default());
+            if let Some(m) = momentum {
+                values.insert("momentum".into(), crate::shader::params::ParamValue::F32(m));
+            }
+            let mut sim = Simulation::new(
+                ctx.clone(),
+                SimConfig { mode: Mode::TwoD, width: 256, height: 256, init: config.init, seed: config.seed },
+            );
+            sim.disable_history();
+            sim.set_pipelines(&built.rule, &built.render, &built.post, built.seed.as_ref()).unwrap();
+            sim.set_params(pack_params(&built.specs, &values));
+            sim
+        };
+        // The share of long snakes' spine cells where the spine bends, after 300 steps.
+        let corners = |momentum: f32| {
+            let mut a = build(&p, Some(momentum));
+            let mut b = build(&garden, None);
+            let mirror_a = a.create_mirror_texture();
+            let mirror_b = b.create_mirror_texture();
+            a.set_other(Some(&mirror_b));
+            b.set_other(Some(&mirror_a));
+            let mut enc = ctx.device.create_command_encoder(&Default::default());
+            for _ in 0..300 {
+                a.mirror_into(&mut enc, &mirror_a);
+                b.mirror_into(&mut enc, &mirror_b);
+                b.step(&mut enc, 1);
+                a.step(&mut enc, 1);
+            }
+            ctx.queue.submit([enc.finish()]);
+            let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            let state = read_back(&a, a.cur);
+            let (w, h) = (a.config.width as i32, a.config.height as i32);
+            let at = |x: i32, y: i32| {
+                let i = (y.rem_euclid(h) * w + x.rem_euclid(w)) as usize * 4;
+                &state[i..i + 4]
+            };
+            let r = |c: &[f32]| c[0].round() as i32;
+            let len = |c: &[f32]| ((c[2].round() as i32 / 2048 - c[3].round() as i32).rem_euclid(2048)) + 1;
+            const DIRS: [(i32, i32); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
+            let (mut spine, mut bends) = (0, 0);
+            for y in 0..h {
+                for x in 0..w {
+                    let c = at(x, y);
+                    if (r(c) % 64) / 8 != 1 || len(c) < 12 {
+                        continue;
+                    }
+                    let (dx, dy) = DIRS[(r(c) % 8) as usize];
+                    let next = at(x + dx, y + dy);
+                    if r(next) / 64 != r(c) / 64 {
+                        continue;
+                    }
+                    spine += 1;
+                    if r(next) % 8 != r(c) % 8 {
+                        bends += 1;
+                    }
+                }
+            }
+            println!("momentum {momentum}: {bends} bends in {spine} spine cells of long snakes");
+            assert!(spine > 100, "too few long snakes to measure at momentum {momentum}: {spine} spine cells");
+            bends as f32 / spine as f32
+        };
+        let free = corners(0.0);
+        let heavy = corners(3.0);
+        assert!(
+            heavy < free * 0.5,
+            "momentum should straighten long snakes: bend share {heavy:.3} vs {free:.3} without"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a GPU"]
     fn reconfigure_clamps_and_resizes() {
         let _gpu = gpu_lock();
         let Some(mut sim) = sim_with(config(Mode::TwoD, 8, 8)) else { return };

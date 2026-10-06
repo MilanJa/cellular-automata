@@ -13,6 +13,11 @@
 //   ripen        a garden cell that has lived this many steps turns into food, so only the
 //                stable structures bear fruit: blocks and beehives become orchards a few
 //                hundred steps after the kill that sowed them, and are eaten away by it
+// And unlike Slither, snakes here have momentum:
+//   momentum     a snake has to go straight for momentum * length / 8 moves before it can turn
+//                at all, and then turns by at most 45 degrees per move beyond that, so a long
+//                snake sweeps wide arcs and cannot always swerve away from a bigger snake or
+//                from prey it would rather not hit; 0 turns as freely as Slither's snakes
 //
 // Cell layout:  .r = kind * 8 + direction + 64 * id   (kind 0 empty, 1 body, 2 head, 3 food,
 //                    4 flesh)
@@ -33,6 +38,7 @@
 // @param eat_life: bool = true
 // @param wall_below: i32 = 0 range 0 .. 60
 // @param ripen: i32 = 200 range 0 .. 2000
+// @param momentum: f32 = 1.0 range 0.0 .. 4.0
 
 const EMPTY = 0;
 const BODY = 1;
@@ -42,6 +48,7 @@ const FLESH = 4;
 const NOBODY = vec2<i32>(-9999, -9999);
 const WRAP = 2048;
 const MAX_WIDTH = 3;
+const MAX_RUN = 16;
 const DIRS = array<vec2<i32>, 8>(
     vec2<i32>(1, 0), vec2<i32>(1, 1), vec2<i32>(0, 1), vec2<i32>(-1, 1),
     vec2<i32>(-1, 0), vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1)
@@ -159,16 +166,46 @@ fn is_deadly(tc: vec4<f32>, my_id: i32, my_len: f32) -> bool {
     return (k == BODY || k == HEAD || k == FLESH) && id_of(tc) != my_id && len_of(tc) > my_len * 1.5 + 2.0;
 }
 
-// Where the head at `p` (state `h`) moves this step: every direction but straight back,
-// scored by what is there (food, garden to graze, a block or death), by how open the cell
-// beyond is, by the scent four cells ahead, by momentum and by a little randomness.
+// How many moves the head at `p` (state `h`) has gone straight: the spine cells right behind
+// it that point the way it is heading, counted up to `limit`.
+fn straight_run(p: vec2<i32>, h: vec4<f32>, limit: i32) -> i32 {
+    let d = dir_of(h);
+    let my_id = id_of(h);
+    var q = p;
+    var run = 0;
+    for (; run < limit; run++) {
+        q -= DIRS[d];
+        let c = cell(q.x, q.y);
+        if (kind_of(c) != BODY || id_of(c) != my_id || dir_of(c) != d) {
+            break;
+        }
+    }
+    return run;
+}
+
+// How far the head may turn this move, in 45-degree steps: freely while the snake is short,
+// otherwise only once it has run straight for momentum * length / 8 moves, one more step for
+// each move beyond that.
+fn max_turn(p: vec2<i32>, h: vec4<f32>) -> i32 {
+    let need = min(i32(params.momentum * len_of(h) / 8.0), MAX_RUN);
+    if (need == 0) {
+        return 3;
+    }
+    return clamp(straight_run(p, h, need + 3) - need, 0, 3);
+}
+
+// Where the head at `p` (state `h`) moves this step: every direction its momentum allows
+// (never straight back), scored by what is there (food, garden to graze, a block or death),
+// by how open the cell beyond is, by the scent four cells ahead, by a bias for going straight
+// and by a little randomness.
 fn decide(p: vec2<i32>, h: vec4<f32>) -> i32 {
     let d = dir_of(h);
     let my_id = id_of(h);
     let my_len = len_of(h);
+    let turn = max_turn(p, h);
     var best = d;
     var best_score = -1e30;
-    for (var k = -3; k <= 3; k++) {
+    for (var k = -turn; k <= turn; k++) {
         let c = (d + k + 8) % 8;
         let t = p + DIRS[c];
         let tc = cell(t.x, t.y);
