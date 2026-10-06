@@ -506,6 +506,64 @@ mod tests {
         assert_eq!(p.rule_b_line_offset, Some(p.user_line_offset + 1));
     }
 
+    /// Every helper a prelude offers users is documented in the README (the error hints point
+    /// users at it). Internal helpers that users are not meant to call are listed here.
+    #[test]
+    fn every_prelude_helper_is_in_the_readme() {
+        const INTERNAL: &[&str] = &["wrap"];
+        let readme = include_str!("../../README.md");
+        let mut missing = Vec::new();
+        for prelude in [RULE_PRELUDE, RENDER_PRELUDE, POST_PRELUDE] {
+            for line in prelude.lines() {
+                let Some(rest) = line.strip_prefix("fn ") else { continue };
+                let name = rest.split('(').next().unwrap();
+                if !INTERNAL.contains(&name) && !readme.contains(&format!("`{name}(")) {
+                    missing.push(name);
+                }
+            }
+        }
+        assert!(missing.is_empty(), "prelude helpers missing from README.md: {missing:?}");
+    }
+
+    /// `GLOBALS_WGSL` and `sim::uniforms::Globals` describe one buffer: same fields at the same
+    /// offsets, same total size.
+    #[test]
+    fn globals_wgsl_matches_the_rust_layout() {
+        use crate::sim::uniforms::Globals;
+        use std::mem::offset_of;
+        let module = naga::front::wgsl::parse_str(GLOBALS_WGSL).expect("GLOBALS_WGSL parses");
+        let (members, span) = module
+            .types
+            .iter()
+            .find_map(|(_, ty)| match &ty.inner {
+                naga::TypeInner::Struct { members, span } if ty.name.as_deref() == Some("Globals") => {
+                    Some((members.clone(), *span))
+                }
+                _ => None,
+            })
+            .expect("struct Globals");
+        let wgsl: Vec<(String, u32)> = members
+            .iter()
+            .filter(|m| !m.name.as_deref().unwrap_or("").starts_with('_'))
+            .map(|m| (m.name.clone().unwrap(), m.offset))
+            .collect();
+        let rust: Vec<(String, u32)> = [
+            ("size", offset_of!(Globals, size)),
+            ("frame", offset_of!(Globals, frame)),
+            ("seed", offset_of!(Globals, seed)),
+            ("time", offset_of!(Globals, time)),
+            ("mode", offset_of!(Globals, mode)),
+            ("row", offset_of!(Globals, row)),
+            ("prev_row", offset_of!(Globals, prev_row)),
+            ("blend", offset_of!(Globals, blend)),
+        ]
+        .into_iter()
+        .map(|(n, o)| (n.to_string(), o as u32))
+        .collect();
+        assert_eq!(wgsl, rust, "field names or offsets differ; update both sides together");
+        assert_eq!(span as usize, std::mem::size_of::<Globals>());
+    }
+
     #[test]
     fn single_rule_assembly_has_no_rule_b_offset() {
         let a = assemble_rule("fn rule(pos: vec2<u32>) -> vec4<f32> { return on(); }", &params_wgsl(&[]));

@@ -1,6 +1,9 @@
 //! The app's look in one place: palette, egui visuals and spacing, and the section headers every
 //! panel uses, so colours and rhythm stay consistent as features are added.
 
+// The one place UI colours are constructed (see clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use egui::{Color32, CornerRadius, FontId, Stroke, TextStyle};
 
 /// Blue: active modulation, selection, the thing to press next.

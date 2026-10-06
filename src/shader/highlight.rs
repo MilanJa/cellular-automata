@@ -109,6 +109,7 @@ pub fn tokenize(src: &str) -> Vec<(TokenKind, &str)> {
     out
 }
 
+#[allow(clippy::disallowed_methods, reason = "the syntax palette is defined here")]
 fn color(kind: TokenKind, dark: bool) -> Color32 {
     match (kind, dark) {
         (TokenKind::Comment, true) => Color32::from_rgb(110, 120, 110),

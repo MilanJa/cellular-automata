@@ -144,6 +144,31 @@ mod tests {
         assert!(!values.contains_key("ghost"));
     }
 
+    /// Every preset folder committed under `presets/` is embedded as a builtin or template.
+    /// Uses git's list so presets saved locally into `./presets` are not counted.
+    #[test]
+    fn every_tracked_preset_folder_is_embedded() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let Ok(out) = std::process::Command::new("git")
+            .args(["ls-files", "presets/**/preset.toml"])
+            .current_dir(root)
+            .output()
+        else {
+            eprintln!("git not available; skipping");
+            return;
+        };
+        let embedded: Vec<&str> = BUILTINS.iter().chain(TEMPLATES).map(|b| b.meta_toml).collect();
+        let missing: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|path| {
+                let text = std::fs::read_to_string(std::path::Path::new(root).join(path)).unwrap();
+                !embedded.contains(&text.as_str())
+            })
+            .map(str::to_string)
+            .collect();
+        assert!(missing.is_empty(), "add these to BUILTINS or TEMPLATES: {missing:?}");
+    }
+
     #[test]
     fn neon_life_ships_with_a_glow_modulation_on_a_declared_param() {
         let b = BUILTINS.iter().find(|b| b.id == "neon_life").unwrap();

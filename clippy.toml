@@ -1,0 +1,8 @@
+# UI colours are named constants in src/app/theme.rs (and the syntax palette in
+# src/shader/highlight.rs), so panels stay consistent. Those two places allow these calls.
+disallowed-methods = [
+    { path = "ecolor::Color32::from_rgb", reason = "use a named colour from app::theme" },
+    { path = "ecolor::Color32::from_gray", reason = "use a named colour from app::theme" },
+    { path = "ecolor::Color32::from_rgba_unmultiplied", reason = "use a named colour from app::theme" },
+    { path = "ecolor::Color32::from_rgba_premultiplied", reason = "use a named colour from app::theme" },
+]

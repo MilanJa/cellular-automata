@@ -196,6 +196,15 @@ mod tests {
     use super::*;
     use crate::shader::params::{ParamType, ParamValue};
 
+    /// Presets, bundles and share links saved before a field existed must still load, so every
+    /// field added after these needs `#[serde(default)]`.
+    #[test]
+    fn a_preset_toml_with_only_the_original_fields_loads() {
+        let text = "name = \"Old\"\nmode = \"2d\"\nwidth = 8\nheight = 8\nsteps_per_frame = 1\nseed = 1\n\n[init]\nkind = \"blank\"\n";
+        let meta: PresetMeta = toml::from_str(text).expect("old preset.toml must still parse");
+        assert_eq!(meta.name, "Old");
+    }
+
     fn sample() -> Preset {
         let mut params = BTreeMap::new();
         params.insert("threshold".into(), toml::Value::Float(0.5));
